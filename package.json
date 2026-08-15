@@ -1,0 +1,16 @@
+{
+  "name": "tunecraft",
+  "version": "0.1.0",
+  "description": "Pandora-style radio playlist generator for Plex, powered by Last.fm and AudioMuse",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=frontend && npm run build --workspace=backend",
+    "start": "npm run start --workspace=backend"
+  }
+}
