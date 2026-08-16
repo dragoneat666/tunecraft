@@ -27,23 +27,49 @@ router.get('/', async (req, res) => {
   res.json(recs.map(r => ({ ...r, in_lidarr: lidarrNames.has(r.artist_name.toLowerCase()) })));
 });
 
-// POST /api/recommendations/:id/add-to-lidarr
-router.post('/:id/add-to-lidarr', async (req, res) => {
+// GET /api/recommendations/:id/lidarr-candidates - search MusicBrainz (via
+// Lidarr's lookup) for every match on this artist's name, so the UI can
+// let the user pick the right one instead of trusting whichever result
+// happens to rank first. That blind-first-result behavior is what caused
+// wrong (e.g. same-named, no-releases) artists to get added.
+router.get('/:id/lidarr-candidates', async (req, res) => {
   const rec = db.prepare('SELECT * FROM recommendations WHERE id = ?').get(req.params.id);
   if (!rec) return res.status(404).json({ error: 'Recommendation not found' });
 
   try {
-    // Check if already in Lidarr
-    const inLibrary = await lidarr.isArtistInLibrary(rec.artist_name);
-    if (inLibrary) {
-      db.prepare(`
-        UPDATE recommendations SET status = 'added_to_lidarr', updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(req.params.id);
-      return res.json({ ok: true, message: `${rec.artist_name} is already in Lidarr` });
+    const candidates = await lidarr.searchArtist(rec.artist_name);
+    res.json({ artist_name: rec.artist_name, candidates });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/recommendations/:id/add-to-lidarr
+// Body may include { mbid } to add a specific MusicBrainz match the user
+// picked from /lidarr-candidates, overriding whatever mbid Last.fm gave us
+// (or the auto-picked first search result if there was none).
+router.post('/:id/add-to-lidarr', async (req, res) => {
+  const rec = db.prepare('SELECT * FROM recommendations WHERE id = ?').get(req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Recommendation not found' });
+
+  const { mbid: mbidOverride } = req.body || {};
+
+  try {
+    if (!mbidOverride) {
+      // Check if already in Lidarr — skip this shortcut when the user is
+      // explicitly picking a specific MusicBrainz match; that's a
+      // deliberate "add this exact one" action, not a duplicate-add.
+      const inLibrary = await lidarr.isArtistInLibrary(rec.artist_name);
+      if (inLibrary) {
+        db.prepare(`
+          UPDATE recommendations SET status = 'added_to_lidarr', updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(req.params.id);
+        return res.json({ ok: true, message: `${rec.artist_name} is already in Lidarr` });
+      }
     }
 
-    await lidarr.addArtist(rec.artist_name, rec.artist_mbid);
+    await lidarr.addArtist(rec.artist_name, mbidOverride || rec.artist_mbid);
 
     db.prepare(`
       UPDATE recommendations SET status = 'added_to_lidarr', updated_at = CURRENT_TIMESTAMP
