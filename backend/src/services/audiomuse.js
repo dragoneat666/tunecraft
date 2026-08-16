@@ -2,6 +2,7 @@ const fetch = require('node-fetch');
 
 const AUDIOMUSE_URL = () => process.env.AUDIOMUSE_URL?.replace(/\/$/, '');
 const AUDIOMUSE_TOKEN = () => process.env.AUDIOMUSE_TOKEN;
+const AUDIOMUSE_SERVER = () => process.env.AUDIOMUSE_SERVER_NAME || null;
 
 function isEnabled() {
   return !!(AUDIOMUSE_URL() && AUDIOMUSE_TOKEN());
@@ -27,18 +28,24 @@ async function audiomuseGet(path) {
   return res.json();
 }
 
+// Build query string, optionally including server name
+function buildQuery(params) {
+  const server = AUDIOMUSE_SERVER();
+  if (server) params.server_name = server;
+  return new URLSearchParams(params).toString();
+}
+
 // Get similar tracks to a given track (by title + artist)
 // Returns array of { title, artist, score }
 async function getSimilarTracks(artistName, trackTitle, limit = 20) {
   if (!isEnabled()) return [];
   try {
-    const data = await audiomuseGet(
-      `/AudioMuseAI/similar_tracks?artist_name=${encodeURIComponent(artistName)}&track_name=${encodeURIComponent(trackTitle)}&limit=${limit}`
-    );
-    return (data?.results || []).map(t => ({
-      title: t.title,
-      artist: t.artist,
-      score: t.score || 0,
+    const query = buildQuery({ artist_name: artistName, track_name: trackTitle, limit });
+    const data = await audiomuseGet(`/api/similar_tracks?${query}`);
+    return (data?.results || data?.tracks || []).map(t => ({
+      title: t.title || t.track_name,
+      artist: t.artist || t.artist_name,
+      score: t.score || t.similarity || 0,
     }));
   } catch (err) {
     console.warn(`[AudioMuse] Failed to get similar tracks for "${trackTitle}":`, err.message);
@@ -47,16 +54,23 @@ async function getSimilarTracks(artistName, trackTitle, limit = 20) {
 }
 
 // Get similar artists (by artist name)
+// Returns array of { name, score }
 async function getSimilarArtists(artistName, limit = 20) {
   if (!isEnabled()) return [];
   try {
-    const data = await audiomuseGet(
-      `/AudioMuseAI/similar_tracks?artist_name=${encodeURIComponent(artistName)}&limit=${limit}`
-    );
-    return (data?.results || []).map(a => ({
-      name: a.artist,
-      score: a.score || 0,
-    }));
+    const query = buildQuery({ artist_name: artistName, limit });
+    const data = await audiomuseGet(`/api/similar_tracks?${query}`);
+    // Deduplicate by artist name from similar tracks results
+    const seen = new Set();
+    const artists = [];
+    for (const t of (data?.results || data?.tracks || [])) {
+      const name = t.artist || t.artist_name;
+      if (name && !seen.has(name.toLowerCase()) && name.toLowerCase() !== artistName.toLowerCase()) {
+        seen.add(name.toLowerCase());
+        artists.push({ name, score: t.score || t.similarity || 0 });
+      }
+    }
+    return artists.slice(0, limit);
   } catch (err) {
     console.warn(`[AudioMuse] Failed to get similar artists for "${artistName}":`, err.message);
     return [];
@@ -64,13 +78,9 @@ async function getSimilarArtists(artistName, limit = 20) {
 }
 
 // Re-rank a list of tracks by sonic similarity to a seed artist
-// Takes existing track list and returns them sorted by AudioMuse score
 async function reRankTracks(seedArtistName, tracks) {
   if (!isEnabled() || !tracks.length) return tracks;
-
   try {
-    // Get AudioMuse's similar tracks for the seed artist
-    // Using a representative top track as the seed
     const seedTrack = tracks.find(t =>
       t.artist?.toLowerCase() === seedArtistName.toLowerCase()
     );
@@ -81,13 +91,11 @@ async function reRankTracks(seedArtistName, tracks) {
       similar.map(s => [`${s.artist?.toLowerCase()}::${s.title?.toLowerCase()}`, s.score])
     );
 
-    // Attach AudioMuse scores to tracks
     const scored = tracks.map(t => ({
       ...t,
       audiomuseScore: scoreMap.get(`${t.artist?.toLowerCase()}::${t.title?.toLowerCase()}`) || 0,
     }));
 
-    // Sort by AudioMuse score descending, keeping 0-score tracks at end
     return scored.sort((a, b) => b.audiomuseScore - a.audiomuseScore);
   } catch (err) {
     console.warn('[AudioMuse] Re-ranking failed, using original order:', err.message);
@@ -95,19 +103,26 @@ async function reRankTracks(seedArtistName, tracks) {
   }
 }
 
-// Test connection
+// Test connection — tries a few likely paths, succeeds if any work
 async function testConnection() {
   if (!isEnabled()) return { ok: false, error: 'AudioMuse not configured' };
-  try {
-    await audiomuseGet('/AudioMuseAI/find_path');
-    return { ok: true };
-  } catch (err) {
-    // 400/422 means the endpoint exists but needs params - that's fine, still connected
-    if (err.message.includes('400') || err.message.includes('422')) {
-      return { ok: true };
+
+  const candidates = ['/api/status', '/api/health', '/apidocs/'];
+
+  for (const path of candidates) {
+    try {
+      const res = await fetch(`${AUDIOMUSE_URL()}${path}`, {
+        headers: audiomuseHeaders(),
+      });
+      if (res.ok || res.status === 400 || res.status === 422) {
+        return { ok: true };
+      }
+    } catch (err) {
+      // try next
     }
-    return { ok: false, error: err.message };
   }
+
+  return { ok: false, error: 'Could not reach AudioMuse on any known endpoint' };
 }
 
 module.exports = {
