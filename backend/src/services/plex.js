@@ -13,6 +13,17 @@ function plexHeaders() {
   };
 }
 
+// Plex's playlist "key" field (as returned by /playlists, and by playlist
+// creation) points at ".../items", not the playlist itself — e.g.
+// "/playlists/448012/items". Anything that needs the item-list endpoint
+// can use the key as-is; anything that appends its own "/items" (or wants
+// the playlist's own endpoint, e.g. to delete it) needs the suffix
+// stripped first, or it ends up double-appending ("/items/items") and
+// Plex 404s. Normalize in one place so every caller agrees.
+function playlistBasePath(playlistKey) {
+  return playlistKey.replace(/\/items$/, '');
+}
+
 async function plexGet(path) {
   const url = `${PLEX_URL()}${path}${path.includes('?') ? '&' : '?'}X-Plex-Token=${PLEX_TOKEN()}`;
   const res = await fetch(url, { headers: plexHeaders() });
@@ -61,7 +72,6 @@ async function getMusicLibraries() {
 async function searchTracksByArtist(artistName) {
   const libraries = await getMusicLibraries();
   const tracks = [];
-
   for (const lib of libraries) {
     try {
       // First find the artist
@@ -70,7 +80,6 @@ async function searchTracksByArtist(artistName) {
         `/library/sections/${lib.key}/search?query=${encoded}&type=8`
       );
       const artists = artistData?.MediaContainer?.Metadata || [];
-
       // For each matching artist, get their tracks
       for (const artist of artists) {
         try {
@@ -87,7 +96,6 @@ async function searchTracksByArtist(artistName) {
       console.warn(`[Plex] Search failed in library ${lib.key}:`, err.message);
     }
   }
-
   return tracks;
 }
 
@@ -115,8 +123,7 @@ async function getRadioPlaylists() {
 
 // Get items in a playlist
 async function getPlaylistItems(playlistKey) {
-  // playlistKey from Plex already includes /items, strip it to avoid duplication
-  const basePath = playlistKey.replace(/\/items$/, '');
+  const basePath = playlistBasePath(playlistKey);
   const data = await plexGet(`${basePath}/items`);
   return data?.MediaContainer?.Metadata || [];
 }
@@ -132,7 +139,6 @@ async function createPlaylist(title, trackRatingKeys) {
   const machineId = await getMachineId();
   const uri = `server://${machineId}/com.plexapp.plugins.library`;
   const items = trackRatingKeys.map(k => `${uri}/library/metadata/${k}`).join(',');
-
   const data = await plexPost(
     `/playlists?type=audio&title=${encodeURIComponent(title)}&smart=0&uri=${encodeURIComponent(items)}`
   );
@@ -144,17 +150,21 @@ async function updatePlaylistItems(playlistKey, trackRatingKeys) {
   const machineId = await getMachineId();
   const uri = `server://${machineId}/com.plexapp.plugins.library`;
   const items = trackRatingKeys.map(k => `${uri}/library/metadata/${k}`).join(',');
-
+  // playlistKey (as stored from Plex's own "key" field) already ends in
+  // "/items" — strip it before appending our own, or the request 404s on
+  // a doubled path like "/playlists/448012/items/items".
+  const basePath = playlistBasePath(playlistKey);
   // Clear existing items
-  await plexDelete(`${playlistKey}/items`);
-
+  await plexDelete(`${basePath}/items`);
   // Add new items
-  await plexPut(`${playlistKey}/items?uri=${encodeURIComponent(items)}`);
+  await plexPut(`${basePath}/items?uri=${encodeURIComponent(items)}`);
 }
 
 // Delete a playlist
 async function deletePlaylist(playlistKey) {
-  await plexDelete(playlistKey);
+  // Same "key" quirk as above: deleting ".../items" would only clear the
+  // playlist's contents, not the playlist itself, so normalize first.
+  await plexDelete(playlistBasePath(playlistKey));
 }
 
 // Test connection
