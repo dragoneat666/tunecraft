@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../hooks/useApi';
 
@@ -118,15 +118,19 @@ export default function PlaylistDetail() {
     }
   }
 
-  async function handleAddRecToPlaylist(recId) {
-    try {
-      await api.addRecToPlaylist(recId, { playlist_id: parseInt(id) });
-      setSuccess('Artist added to playlist seeds');
-      await load();
-    } catch (err) {
-      setError(err.message);
+  // Distinct artists actually present in the current track list, with how
+  // many tracks each one contributes. Derived from playlist.tracks rather
+  // than a separate API call since that data's already fetched.
+  const artistCounts = useMemo(() => {
+    if (!playlist?.tracks?.length) return [];
+    const counts = new Map();
+    for (const t of playlist.tracks) {
+      counts.set(t.artist_name, (counts.get(t.artist_name) || 0) + 1);
     }
-  }
+    return [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [playlist?.tracks]);
 
   if (loading) return <div className="loading">Loading...</div>;
   if (!playlist) return <div className="alert alert-error">Playlist not found</div>;
@@ -158,11 +162,12 @@ export default function PlaylistDetail() {
       {success && <div className="alert alert-success">✅ {success} <button onClick={() => setSuccess(null)} style={{ marginLeft: 8, background: 'none', border: 'none', color: 'inherit', cursor: 'pointer' }}>✕</button></div>}
 
       <div className="tabs">
-        {['seeds', 'recommendations', 'tracks', 'settings'].map(t => (
+        {['seeds', 'recommendations', 'tracks', 'artists', 'settings'].map(t => (
           <button key={t} className={`tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
             {t === 'seeds' && `🌱 Seeds (${playlist.seeds?.length || 0})`}
             {t === 'recommendations' && `💡 Recommendations (${playlist.recommendations?.length || 0})`}
             {t === 'tracks' && `🎵 Tracks (${playlist.tracks?.length || 0})`}
+            {t === 'artists' && `🎤 Artists (${artistCounts.length})`}
             {t === 'settings' && '⚙️ Settings'}
           </button>
         ))}
@@ -213,7 +218,9 @@ export default function PlaylistDetail() {
         <div className="card">
           <div className="card-title">Similar Artist Recommendations</div>
           <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-            Artists similar to your seeds that you might want to add to Lidarr or include in this playlist.
+            Artists similar to your seeds that are already in your Plex library get added to this playlist
+            automatically. These are the ones that aren't (or didn't meet the similarity bar) — add them to
+            Lidarr to get the music.
           </p>
           {!playlist.recommendations?.length ? (
             <p style={{ color: '#888', fontSize: 14 }}>No recommendations yet. Rebuild the playlist to generate them.</p>
@@ -223,19 +230,20 @@ export default function PlaylistDetail() {
                 <div className="rec-info">
                   <div className="rec-name">{rec.artist_name}</div>
                   <div className="rec-meta">
-                    Similarity: {Math.round((rec.similarity_score || 0) * 100)}% · via {rec.source}
+                    Similarity: {Math.round((rec.similarity_score || 0) * 100)}%
+                    {' · '}
+                    {rec.source === 'plex' ? 'already in your library' : 'not in your library'}
                   </div>
                 </div>
                 <div className="rec-actions">
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => handleAddRecToPlaylist(rec.id)}
-                    title="Add as seed to this playlist"
-                  >+ Playlist</button>
-                  <button
-                    className="btn btn-primary btn-sm"
-                    onClick={() => handleAddToLidarr(rec.id)}
-                  >+ Lidarr</button>
+                  {rec.in_lidarr ? (
+                    <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
+                  ) : (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={() => handleAddToLidarr(rec.id)}
+                    >+ Lidarr</button>
+                  )}
                   <button
                     className="btn btn-secondary btn-sm"
                     onClick={() => handleDismissRec(rec.id)}
@@ -266,6 +274,32 @@ export default function PlaylistDetail() {
                       {(track.lastfm_playcount / 1000).toFixed(0)}k plays
                     </div>
                   )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'artists' && (
+        <div className="card">
+          <div className="card-title">Artists in This Playlist</div>
+          <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
+            Every artist currently contributing tracks to this playlist (seed artists plus auto-included similar artists).
+          </p>
+          {!artistCounts.length ? (
+            <p style={{ color: '#888', fontSize: 14 }}>No tracks yet. Rebuild the playlist to populate it.</p>
+          ) : (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+              {artistCounts.map(a => (
+                <div
+                  key={a.name}
+                  style={{ padding: '8px 14px', background: '#1a1a1a', borderRadius: 8, fontSize: 14 }}
+                >
+                  <span style={{ fontWeight: 500 }}>{a.name}</span>
+                  <span style={{ color: '#888', marginLeft: 8, fontSize: 12 }}>
+                    {a.count} track{a.count !== 1 ? 's' : ''}
+                  </span>
                 </div>
               ))}
             </div>
