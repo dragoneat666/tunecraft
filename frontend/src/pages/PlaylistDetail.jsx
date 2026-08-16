@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../hooks/useApi';
+import LidarrMatchPicker from '../components/LidarrMatchPicker';
 
 function WeightLabel({ weight }) {
   if (weight === 0) return <span style={{ color: '#e05252', fontSize: 12 }}>Excluded</span>;
@@ -20,6 +21,7 @@ export default function PlaylistDetail() {
   const [addingArtist, setAddingArtist] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [pickerRec, setPickerRec] = useState(null); // rec currently being matched against MusicBrainz
 
   useEffect(() => {
     load();
@@ -126,6 +128,12 @@ export default function PlaylistDetail() {
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  function handleLidarrPicked(result) {
+    setPickerRec(null);
+    setSuccess(result.message);
+    load();
   }
 
   // Distinct artists actually present in the current track list, with how
@@ -254,10 +262,17 @@ export default function PlaylistDetail() {
                   {rec.in_lidarr ? (
                     <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
                   ) : (
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={() => handleAddToLidarr(rec.id)}
-                    >+ Lidarr</button>
+                    <>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleAddToLidarr(rec.id)}
+                      >+ Lidarr</button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        title="Multiple artists can share this name — pick the right MusicBrainz match before adding"
+                        onClick={() => setPickerRec(rec)}
+                      >🔍 Pick match</button>
+                    </>
                   )}
                   <button
                     className="btn btn-secondary btn-sm"
@@ -268,6 +283,15 @@ export default function PlaylistDetail() {
             ))
           )}
         </div>
+      )}
+
+      {pickerRec && (
+        <LidarrMatchPicker
+          recId={pickerRec.id}
+          artistName={pickerRec.artist_name}
+          onClose={() => setPickerRec(null)}
+          onAdded={handleLidarrPicked}
+        />
       )}
 
       {tab === 'tracks' && (
