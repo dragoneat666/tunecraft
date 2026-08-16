@@ -99,9 +99,13 @@ async function reRankTracks(seedArtistName, tracks) {
 async function testConnection() {
   if (!isEnabled()) return { ok: false, error: 'AudioMuse not configured' };
   try {
-    await audiomuseGet('/AudioMuseAI/health');
+    await audiomuseGet('/AudioMuseAI/find_path');
     return { ok: true };
   } catch (err) {
+    // 400/422 means the endpoint exists but needs params - that's fine, still connected
+    if (err.message.includes('400') || err.message.includes('422')) {
+      return { ok: true };
+    }
     return { ok: false, error: err.message };
   }
 }
