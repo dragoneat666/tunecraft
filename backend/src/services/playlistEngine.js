@@ -213,8 +213,11 @@ async function buildPlaylist(playlistId) {
   const includedArtists = new Set(seeds.map(s => s.artist_name.toLowerCase()));
 
   // --- Phase 1: Seed artists ---
-  // Reserve 60% of tracks for seeds, 40% for similar artists found in Plex
-  const seedTrackTarget = Math.floor(playlist.track_count * 0.6);
+  // Reserve 30% of tracks for seeds, 70% for similar artists found in Plex.
+  // (Used to be 60/40 — that skewed playlists too heavily toward repeating
+  // the seed artist itself rather than exploring the similar artists
+  // that's the whole point of "radio.")
+  const seedTrackTarget = Math.floor(playlist.track_count * 0.3);
   const similarTrackTarget = playlist.track_count - seedTrackTarget;
 
   const seedAllocations = calculateAllocations(seeds, seedTrackTarget);
@@ -260,21 +263,36 @@ async function buildPlaylist(playlistId) {
   // Get similar artists from Last.fm for all seeds, dropping anything
   // below the "worth showing" floor immediately — no point spending a
   // Plex lookup, or a slot in the recommendations list, on an artist that
-  // will never be surfaced no matter what.
+  // will never be surfaced no matter what. Filtered-out candidates are
+  // tracked separately (name → best score seen across seeds) purely for
+  // the diagnostic log below — otherwise there's no way to tell "was this
+  // artist just below the floor" from "Tunecraft never even saw it."
   const allSimilar = new Map();
+  const filteredBelowFloor = new Map();
   for (const seed of seeds) {
     const similar = await lastfm.getSimilarArtists(seed.artist_name, SIMILAR_PER_SEED_LIMIT);
     for (const s of similar) {
-      if (
-        s.match >= MIN_SIMILARITY_TO_SHOW &&
-        !allSimilar.has(s.name.toLowerCase()) &&
-        !includedArtists.has(s.name.toLowerCase())
-      ) {
-        allSimilar.set(s.name.toLowerCase(), { name: s.name, mbid: s.mbid, score: s.match });
+      const key = s.name.toLowerCase();
+      if (s.match < MIN_SIMILARITY_TO_SHOW) {
+        if (!filteredBelowFloor.has(key) || s.match > filteredBelowFloor.get(key)) {
+          filteredBelowFloor.set(key, s.match);
+        }
+        continue;
+      }
+      if (!allSimilar.has(key) && !includedArtists.has(key)) {
+        allSimilar.set(key, { name: s.name, mbid: s.mbid, score: s.match });
       }
     }
   }
   console.log(`[Engine] Found ${allSimilar.size} similar artist(s) at or above ${Math.round(MIN_SIMILARITY_TO_SHOW * 100)}% similarity, checking Plex library...`);
+  if (filteredBelowFloor.size) {
+    const topFiltered = [...filteredBelowFloor.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15)
+      .map(([name, score]) => `${name} (${Math.round(score * 100)}%)`)
+      .join(', ');
+    console.log(`[Engine] ${filteredBelowFloor.size} artist(s) below the ${Math.round(MIN_SIMILARITY_TO_SHOW * 100)}% floor, not shown at all — highest-scoring of those: ${topFiltered}`);
+  }
 
   // Sort by similarity score so Phase 2's track-budget allocation below
   // processes the best matches first.
