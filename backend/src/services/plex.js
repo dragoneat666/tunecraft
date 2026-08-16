@@ -134,6 +134,17 @@ async function getRadioPlaylists() {
   return all.filter(p => p.title?.startsWith('Radio:'));
 }
 
+// Find an existing playlist by exact title match (case-insensitive).
+// Used as a fallback when a playlist's stored key has gone stale (e.g.
+// the user deleted/recreated the playlist in Plex, or an earlier bug
+// created it) so we reuse the playlist that already exists instead of
+// spawning a duplicate.
+async function findPlaylistByTitle(title) {
+  const all = await getAllPlaylists();
+  const match = all.find(p => p.title?.toLowerCase() === title.toLowerCase());
+  return match || null;
+}
+
 // Get items in a playlist
 async function getPlaylistItems(playlistKey) {
   const basePath = playlistBasePath(playlistKey);
@@ -204,6 +215,7 @@ module.exports = {
   searchTrack,
   getAllPlaylists,
   getRadioPlaylists,
+  findPlaylistByTitle,
   getPlaylistItems,
   createPlaylist,
   updatePlaylistItems,
