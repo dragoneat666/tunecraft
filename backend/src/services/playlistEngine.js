@@ -77,6 +77,23 @@ async function findTracksInPlex(artistName, lastfmTracks, plexTracksOverride = n
   return matched;
 }
 
+// Look up a Plex playlist by exact title before falling back to creating
+// a brand new one. This is the guard against duplicate playlists: if the
+// DB's stored key is missing or stale (e.g. the user made the playlist
+// manually, or an earlier bug created it and it got cleaned up), we
+// reuse whatever playlist already exists in Plex with this name rather
+// than spawning another one every rebuild.
+async function findOrCreatePlaylistByName(name, ratingKeys) {
+  const existing = await plex.findPlaylistByTitle(name);
+  if (existing) {
+    console.log(`[Engine] Found existing Plex playlist "${name}" (key ${existing.key}), updating it`);
+    await plex.updatePlaylistItems(existing.key, ratingKeys);
+    return { key: existing.key, ratingKey: existing.ratingKey };
+  }
+  console.log(`[Engine] No existing Plex playlist named "${name}" found, creating a new one`);
+  return plex.createPlaylist(name, ratingKeys);
+}
+
 async function buildPlaylist(playlistId) {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId);
   if (!playlist) throw new Error(`Playlist ${playlistId} not found`);
@@ -198,18 +215,24 @@ async function buildPlaylist(playlistId) {
   // Get rating keys for Plex API
   const ratingKeys = finalTracks.map(t => t.ratingKey);
 
-  // Create or update playlist in Plex
+  // Create or update playlist in Plex.
+  // Before ever creating a new playlist, try to find one that already
+  // exists in Plex with this exact name — either via the stored key, or
+  // (if that key is missing/stale) by looking it up by title. This is
+  // what keeps Tunecraft from spawning a duplicate "Radio: X" playlist
+  // every time the stored key goes bad; it always prefers updating the
+  // playlist you already created in Plex over making a new one.
   let plexPlaylist;
   if (playlist.plex_playlist_key) {
     try {
       await plex.updatePlaylistItems(playlist.plex_playlist_key, ratingKeys);
       plexPlaylist = { key: playlist.plex_playlist_key, ratingKey: playlist.plex_playlist_id };
     } catch (err) {
-      console.warn('[Engine] Failed to update existing playlist, creating new one:', err.message);
-      plexPlaylist = await plex.createPlaylist(playlist.name, ratingKeys);
+      console.warn(`[Engine] Stored Plex key for "${playlist.name}" didn't work (${err.message}), looking it up by name instead...`);
+      plexPlaylist = await findOrCreatePlaylistByName(playlist.name, ratingKeys);
     }
   } else {
-    plexPlaylist = await plex.createPlaylist(playlist.name, ratingKeys);
+    plexPlaylist = await findOrCreatePlaylistByName(playlist.name, ratingKeys);
   }
 
   // Update DB with Plex playlist info
