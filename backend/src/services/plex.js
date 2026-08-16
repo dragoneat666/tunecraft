@@ -94,6 +94,18 @@ function normalizeArtistName(name) {
     .replace(/^the\s+/, '');
 }
 
+// Strip everything down to just letters and numbers. Used as a last-resort
+// match: Plex's metadata agents pull artist names from MusicBrainz, which
+// sometimes uses different punctuation than Last.fm does for the same
+// artist (a non-breaking hyphen instead of a plain "-" in "Blink-182", a
+// curly apostrophe instead of a straight one, etc.) — differences that are
+// invisible when you're just looking at the name but that break an exact
+// string comparison. Reducing both sides to bare alphanumerics sidesteps
+// punctuation entirely.
+function alnumOnly(name) {
+  return normalizeArtistName(name).replace(/[^a-z0-9]/g, '');
+}
+
 // Index of every artist across every music library, keyed by normalized
 // name. Cached briefly (5 min) since a playlist build can check upwards
 // of 100 similar-artist candidates, and re-fetching the whole artist list
@@ -111,6 +123,31 @@ function normalizeArtistName(name) {
 let artistIndexCache = { data: null, expiresAt: 0 };
 const ARTIST_INDEX_TTL_MS = 5 * 60 * 1000;
 
+// Fetch every artist in a library section, paging through results instead
+// of trusting a single unpaged request to return everything. Plex doesn't
+// always hand back a full library in one response for larger libraries —
+// paging explicitly with X-Plex-Container-Start/Size guarantees nothing
+// past the first page gets silently dropped, which otherwise would look
+// exactly like the artist "not being in Plex" from Tunecraft's side even
+// though it's right there further down the list.
+const ARTIST_PAGE_SIZE = 500;
+
+async function fetchAllArtistsInSection(libKey) {
+  const all = [];
+  let start = 0;
+  while (true) {
+    const data = await plexGet(
+      `/library/sections/${libKey}/all?type=8&X-Plex-Container-Start=${start}&X-Plex-Container-Size=${ARTIST_PAGE_SIZE}`
+    );
+    const batch = data?.MediaContainer?.Metadata || [];
+    all.push(...batch);
+    const totalSize = data?.MediaContainer?.totalSize ?? data?.MediaContainer?.size ?? batch.length;
+    start += batch.length;
+    if (batch.length === 0 || start >= totalSize) break;
+  }
+  return all;
+}
+
 async function getArtistIndex() {
   if (artistIndexCache.data && Date.now() < artistIndexCache.expiresAt) {
     return artistIndexCache.data;
@@ -119,8 +156,7 @@ async function getArtistIndex() {
   const index = new Map();
   for (const lib of libraries) {
     try {
-      const data = await plexGet(`/library/sections/${lib.key}/all?type=8`);
-      const artists = data?.MediaContainer?.Metadata || [];
+      const artists = await fetchAllArtistsInSection(lib.key);
       for (const artist of artists) {
         const key = normalizeArtistName(artist.title);
         if (key && !index.has(key)) {
@@ -155,7 +191,21 @@ async function searchTracksByArtist(artistName) {
     if (contains.length === 1) match = contains[0];
   }
 
-  if (!match) return [];
+  // Last resort: compare with all punctuation stripped out, so an
+  // invisible punctuation difference between Last.fm's name and however
+  // Plex's metadata agent stored it (a non-breaking hyphen vs. a plain
+  // "-" in "Blink-182", a curly vs. straight apostrophe, etc.) doesn't
+  // cause a real match to be missed. Same unambiguous-only rule as above.
+  if (!match) {
+    const needleAlnum = alnumOnly(artistName);
+    const alnumMatches = needleAlnum ? [...index.values()].filter(a => alnumOnly(a.title) === needleAlnum) : [];
+    if (alnumMatches.length === 1) match = alnumMatches[0];
+  }
+
+  if (!match) {
+    console.warn(`[Plex] "${artistName}" not found among ${index.size} indexed artists (normalized: "${normalizeArtistName(artistName)}")`);
+    return [];
+  }
 
   try {
     const trackData = await plexGet(
