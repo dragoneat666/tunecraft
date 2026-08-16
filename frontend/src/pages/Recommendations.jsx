@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../hooks/useApi';
+import LidarrMatchPicker from '../components/LidarrMatchPicker';
 
 export default function Recommendations() {
   const [recs, setRecs] = useState([]);
@@ -7,6 +8,7 @@ export default function Recommendations() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [pickerRec, setPickerRec] = useState(null); // rec currently being matched against MusicBrainz
 
   useEffect(() => {
     load();
@@ -55,6 +57,12 @@ export default function Recommendations() {
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  function handleLidarrPicked(result) {
+    setPickerRec(null);
+    setSuccess(result.message);
+    load();
   }
 
   if (loading) return <div className="loading">Loading recommendations...</div>;
@@ -109,10 +117,17 @@ export default function Recommendations() {
                   {rec.in_lidarr ? (
                     <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
                   ) : (
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={() => handleAddToLidarr(rec.id)}
-                    >+ Lidarr</button>
+                    <>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleAddToLidarr(rec.id)}
+                      >+ Lidarr</button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        title="Multiple artists can share this name — pick the right MusicBrainz match before adding"
+                        onClick={() => setPickerRec(rec)}
+                      >🔍 Pick match</button>
+                    </>
                   )}
                   <button
                     className="btn btn-secondary btn-sm"
@@ -123,6 +138,15 @@ export default function Recommendations() {
             ))}
           </div>
         </div>
+      )}
+
+      {pickerRec && (
+        <LidarrMatchPicker
+          recId={pickerRec.id}
+          artistName={pickerRec.artist_name}
+          onClose={() => setPickerRec(null)}
+          onAdded={handleLidarrPicked}
+        />
       )}
     </div>
   );
