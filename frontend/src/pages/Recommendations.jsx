@@ -3,6 +3,7 @@ import { api } from '../hooks/useApi';
 
 export default function Recommendations() {
   const [recs, setRecs] = useState([]);
+  const [playlists, setPlaylists] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
@@ -14,7 +15,12 @@ export default function Recommendations() {
   async function load() {
     try {
       setLoading(true);
-      setRecs(await api.getRecommendations());
+      const [recsData, playlistsData] = await Promise.all([
+        api.getRecommendations(),
+        api.getPlaylists(),
+      ]);
+      setRecs(recsData);
+      setPlaylists(playlistsData);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -35,6 +41,16 @@ export default function Recommendations() {
   async function handleDismiss(id) {
     try {
       await api.dismissRecommendation(id);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleAddToPlaylist(recId, playlistId) {
+    try {
+      await api.addRecToPlaylist(recId, { playlist_id: parseInt(playlistId) });
+      setSuccess('Artist added to playlist');
       await load();
     } catch (err) {
       setError(err.message);
@@ -62,8 +78,9 @@ export default function Recommendations() {
         <div>
           <p style={{ fontSize: 14, color: '#888', marginBottom: 20 }}>
             {recs.length} similar artist{recs.length !== 1 ? 's' : ''} found across your playlists.
-            Artists already in your Plex library get added to their playlist automatically — these need
-            Lidarr to get the music, or weren't a close enough match to auto-include.
+            Artists already in your Plex library and matched closely enough get added to their playlist
+            automatically — these didn't, so add them to a playlist by hand, or send them to Lidarr to get
+            the music.
           </p>
           <div className="card">
             {recs.map(rec => (
@@ -76,6 +93,19 @@ export default function Recommendations() {
                   </div>
                 </div>
                 <div className="rec-actions">
+                  {playlists.length > 0 && (
+                    <select
+                      className="form-select"
+                      style={{ width: 'auto', fontSize: 12, padding: '4px 8px' }}
+                      defaultValue=""
+                      onChange={e => e.target.value && handleAddToPlaylist(rec.id, e.target.value)}
+                    >
+                      <option value="" disabled>+ Add to playlist</option>
+                      {playlists.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  )}
                   {rec.in_lidarr ? (
                     <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
                   ) : (
