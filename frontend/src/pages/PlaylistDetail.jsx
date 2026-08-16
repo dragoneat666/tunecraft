@@ -118,6 +118,16 @@ export default function PlaylistDetail() {
     }
   }
 
+  async function handleAddRecToPlaylist(recId) {
+    try {
+      await api.addRecToPlaylist(recId, { playlist_id: parseInt(id) });
+      setSuccess('Artist added to playlist seeds');
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   // Distinct artists actually present in the current track list, with how
   // many tracks each one contributes. Derived from playlist.tracks rather
   // than a separate API call since that data's already fetched.
@@ -218,9 +228,9 @@ export default function PlaylistDetail() {
         <div className="card">
           <div className="card-title">Similar Artist Recommendations</div>
           <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-            Artists similar to your seeds that are already in your Plex library get added to this playlist
-            automatically. These are the ones that aren't (or didn't meet the similarity bar) — add them to
-            Lidarr to get the music.
+            Artists similar to your seeds that are already in your Plex library and matched closely enough
+            get added to this playlist automatically. These didn't — add them as a seed to include them
+            anyway, or send them to Lidarr to get the music.
           </p>
           {!playlist.recommendations?.length ? (
             <p style={{ color: '#888', fontSize: 14 }}>No recommendations yet. Rebuild the playlist to generate them.</p>
@@ -236,6 +246,11 @@ export default function PlaylistDetail() {
                   </div>
                 </div>
                 <div className="rec-actions">
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleAddRecToPlaylist(rec.id)}
+                    title="Add as seed to this playlist"
+                  >+ Playlist</button>
                   {rec.in_lidarr ? (
                     <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
                   ) : (
