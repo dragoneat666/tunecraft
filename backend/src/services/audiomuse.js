@@ -8,11 +8,15 @@ function isEnabled() {
 }
 
 function audiomuseHeaders() {
-  return {
-    'Authorization': `Bearer ${AUDIOMUSE_TOKEN()}`,
+  const headers = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
   };
+  const token = AUDIOMUSE_TOKEN();
+  if (token && token !== 'disabled') {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 async function audiomuseGet(path) {
@@ -29,7 +33,7 @@ async function getSimilarTracks(artistName, trackTitle, limit = 20) {
   if (!isEnabled()) return [];
   try {
     const data = await audiomuseGet(
-      `/api/v1/similar/track?artist=${encodeURIComponent(artistName)}&title=${encodeURIComponent(trackTitle)}&limit=${limit}`
+      `/AudioMuseAI/similar_tracks?artist_name=${encodeURIComponent(artistName)}&title=${encodeURIComponent(trackTitle)}&limit=${limit}`
     );
     return (data?.results || []).map(t => ({
       title: t.title,
@@ -47,7 +51,7 @@ async function getSimilarArtists(artistName, limit = 20) {
   if (!isEnabled()) return [];
   try {
     const data = await audiomuseGet(
-      `/api/v1/similar/artist?artist=${encodeURIComponent(artistName)}&limit=${limit}`
+      `/AudioMuseAI/similar_tracks?artist_name=${encodeURIComponent(artistName)}&limit=${limit}`
     );
     return (data?.results || []).map(a => ({
       name: a.artist,
@@ -95,7 +99,7 @@ async function reRankTracks(seedArtistName, tracks) {
 async function testConnection() {
   if (!isEnabled()) return { ok: false, error: 'AudioMuse not configured' };
   try {
-    await audiomuseGet('/api/v1/health');
+    await audiomuseGet('/AudioMuseAI/health');
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
