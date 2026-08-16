@@ -30,7 +30,7 @@ app.use('/api/settings', require('./routes/settings'));
 app.get('/api/health', (req, res) => res.json({ ok: true, version: '0.1.0' }));
 
 // Serve frontend in production
-const frontendDist = path.join(__dirname, '../../frontend/dist');
+const frontendDist = path.join(__dirname, '../frontend/dist');
 app.use(express.static(frontendDist));
 app.get('*', (req, res) => {
   res.sendFile(path.join(frontendDist, 'index.html'));
