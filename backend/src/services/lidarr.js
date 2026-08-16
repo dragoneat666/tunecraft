@@ -43,13 +43,31 @@ async function searchArtist(artistName) {
   }
 }
 
-// Get all artists already in Lidarr
+// Get all artists already in Lidarr.
+//
+// This gets called on every playlist-detail and recommendations page load
+// (to flag which recs are already in Lidarr), which was making those pages
+// noticeably slower once that check was added — every page view meant a
+// fresh round trip to Lidarr. A short in-memory cache fixes that: the
+// artist list doesn't change often enough to need a live fetch every time,
+// and 60 seconds of staleness here is harmless (nothing safety-critical
+// depends on it being instant, and add-to-lidarr invalidates the cache
+// immediately after adding, below).
+let artistsCache = { data: null, expiresAt: 0 };
+const ARTISTS_CACHE_TTL_MS = 60 * 1000;
+
 async function getAllArtists() {
+  if (artistsCache.data && Date.now() < artistsCache.expiresAt) {
+    return artistsCache.data;
+  }
   try {
-    return await lidarrGet('/artist');
+    const data = await lidarrGet('/artist');
+    artistsCache = { data, expiresAt: Date.now() + ARTISTS_CACHE_TTL_MS };
+    return data;
   } catch (err) {
     console.warn('[Lidarr] Failed to get artists:', err.message);
-    return [];
+    // Prefer serving stale data over nothing if Lidarr is temporarily down.
+    return artistsCache.data || [];
   }
 }
 
@@ -96,7 +114,11 @@ async function addArtist(artistName, mbid = null) {
     },
   };
 
-  return lidarrPost('/artist', payload);
+  const created = await lidarrPost('/artist', payload);
+  // Invalidate the cache so the next getAllArtists() call reflects this
+  // add immediately instead of waiting out the TTL.
+  artistsCache = { data: null, expiresAt: 0 };
+  return created;
 }
 
 // Test connection

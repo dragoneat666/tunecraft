@@ -114,7 +114,13 @@ export default function Recommendations() {
                       ))}
                     </select>
                   )}
-                  {rec.in_lidarr ? (
+                  {rec.source === 'plex' ? (
+                    // Already sitting in your Plex library — just below the
+                    // similarity threshold to auto-add. There's nothing to
+                    // fetch from Lidarr for music you already own, so only
+                    // offer the manual "+ Add to playlist" dropdown above.
+                    <span style={{ fontSize: 12, color: '#888' }}>Already in your library</span>
+                  ) : rec.in_lidarr ? (
                     <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
                   ) : (
                     <>
