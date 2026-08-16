@@ -241,8 +241,29 @@ async function buildPlaylist(playlistId) {
   }
 
   // Store similar artist recommendations
-  // Filter out artists already in seeds and already recommended
   const seedNames = new Set(seeds.map(s => s.artist_name.toLowerCase()));
+
+  // Clean up stale recommendations: an artist that's now a seed, or that we
+  // just confirmed is in Plex this build (and therefore got auto-included
+  // into the playlist instead of recommended), should not linger in the
+  // recommendations table. Without this, an artist that got added to Plex
+  // or Lidarr after an earlier build would keep showing an "Add to
+  // Playlist" / "Add to Lidarr" option in the UI forever, since the upsert
+  // below only ever adds or updates rows — it never removes them.
+  const staleRecNames = new Set([
+    ...seedNames,
+    ...inPlexSimilar.map(s => s.name.toLowerCase()),
+  ]);
+  if (staleRecNames.size) {
+    const deleteStaleRec = db.prepare(
+      'DELETE FROM recommendations WHERE playlist_id = ? AND LOWER(artist_name) = ?'
+    );
+    for (const name of staleRecNames) {
+      deleteStaleRec.run(playlistId, name);
+    }
+  }
+
+  // Filter out artists already in seeds and already recommended
   const existingRecs = db.prepare(
     'SELECT artist_name FROM recommendations WHERE playlist_id = ?'
   ).all(playlistId).map(r => r.artist_name.toLowerCase());
