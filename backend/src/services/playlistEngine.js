@@ -95,12 +95,25 @@ async function findOrCreatePlaylistByName(name, ratingKeys) {
 }
 
 // If the playlist already exists in Plex, check its current items for any
-// artist that isn't already a seed and add them as one. This is what
-// catches a song dragged into the playlist by hand directly in Plex —
-// without it, the artist is invisible to Tunecraft and the rebuild below
-// (which deletes and replaces every item in the Plex playlist) would just
-// silently wipe the manual addition instead of folding it in. Returns how
-// many new seeds were added.
+// artist that's genuinely new — i.e. actually added by hand — and add them
+// as a seed. This is what catches a song dragged into the playlist by hand
+// directly in Plex — without it, the artist is invisible to Tunecraft and
+// the rebuild below (which deletes and replaces every item in the Plex
+// playlist) would just silently wipe the manual addition instead of
+// folding it in. Returns how many new seeds were added.
+//
+// "Genuinely new" has to be checked against more than just the current
+// seed list: buildPlaylist's Phase 2 auto-includes similar artists as
+// TRACKS without ever making them seeds, so their names show up in the
+// Plex playlist's items too. If this only compared against seeds, every
+// auto-included similar artist would look "manually added" on the very
+// next scan/rebuild and get promoted to a full seed — which then pulls in
+// its own similar artists, which get promoted the time after that, and so
+// on, snowballing into dozens of seeds from a single manual edit. So the
+// comparison set is seeds PLUS every artist Tunecraft itself wrote into
+// this playlist on the last build (playlist_tracks, which still holds the
+// previous build's output at this point — it isn't cleared until later in
+// buildPlaylist). Only an artist in neither set is truly new.
 async function reconcileManualAdditions(playlist, seeds) {
   if (!playlist.plex_playlist_key) return 0;
 
@@ -113,7 +126,15 @@ async function reconcileManualAdditions(playlist, seeds) {
   }
 
   const existingArtists = new Set(existingItems.map(i => i.grandparentTitle).filter(Boolean));
-  const seedNames = new Set(seeds.map(s => s.artist_name.toLowerCase()));
+
+  const knownArtists = new Set(seeds.map(s => s.artist_name.toLowerCase()));
+  const lastBuildArtists = db.prepare(
+    'SELECT DISTINCT artist_name FROM playlist_tracks WHERE playlist_id = ?'
+  ).all(playlist.id);
+  for (const row of lastBuildArtists) {
+    knownArtists.add(row.artist_name.toLowerCase());
+  }
+
   const insertSeed = db.prepare(`
     INSERT OR IGNORE INTO playlist_seeds (playlist_id, artist_name, weight)
     VALUES (?, ?, 5)
@@ -121,9 +142,9 @@ async function reconcileManualAdditions(playlist, seeds) {
 
   const addedNames = [];
   for (const artist of existingArtists) {
-    if (!seedNames.has(artist.toLowerCase())) {
+    if (!knownArtists.has(artist.toLowerCase())) {
       insertSeed.run(playlist.id, artist);
-      seedNames.add(artist.toLowerCase());
+      knownArtists.add(artist.toLowerCase());
       addedNames.push(artist);
     }
   }
