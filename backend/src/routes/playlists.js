@@ -3,6 +3,21 @@ const router = express.Router();
 const { db } = require('../db');
 const { buildPlaylist, scanForNewRadioPlaylists, generatePlaylistName } = require('../services/playlistEngine');
 const lastfm = require('../services/lastfm');
+const lidarr = require('../services/lidarr');
+
+// Fetch Lidarr's current artist list once and return a lowercase name set,
+// so callers can flag recommendations that are already in Lidarr without
+// making one Lidarr API call per recommendation. Lidarr being unreachable
+// shouldn't break the page — just means nothing gets flagged.
+async function getLidarrNameSet() {
+  try {
+    const artists = await lidarr.getAllArtists();
+    return new Set(artists.map(a => a.artistName?.toLowerCase()).filter(Boolean));
+  } catch (err) {
+    console.warn('[Routes] Failed to check Lidarr library:', err.message);
+    return new Set();
+  }
+}
 
 // GET /api/playlists - list all managed playlists
 router.get('/', (req, res) => {
@@ -22,7 +37,7 @@ router.get('/', (req, res) => {
 });
 
 // GET /api/playlists/:id - get playlist details with seeds and recommendations
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id);
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
 
@@ -36,11 +51,19 @@ router.get('/:id', (req, res) => {
     ORDER BY similarity_score DESC
   `).all(req.params.id);
 
+  // Flag which recommendations are already in Lidarr so the UI can hide
+  // the "+ Lidarr" button for them instead of offering to re-add.
+  const lidarrNames = await getLidarrNameSet();
+  const recommendationsWithLidarrStatus = recommendations.map(r => ({
+    ...r,
+    in_lidarr: lidarrNames.has(r.artist_name.toLowerCase()),
+  }));
+
   const tracks = db.prepare(`
     SELECT * FROM playlist_tracks WHERE playlist_id = ? ORDER BY added_at DESC
   `).all(req.params.id);
 
-  res.json({ ...playlist, seeds, recommendations, tracks });
+  res.json({ ...playlist, seeds, recommendations: recommendationsWithLidarrStatus, tracks });
 });
 
 // POST /api/playlists - create a new playlist
