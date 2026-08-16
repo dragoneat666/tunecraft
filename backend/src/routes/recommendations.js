@@ -4,7 +4,7 @@ const { db } = require('../db');
 const lidarr = require('../services/lidarr');
 
 // GET /api/recommendations - all pending recommendations across playlists
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const recs = db.prepare(`
     SELECT r.*, p.name as playlist_name
     FROM recommendations r
@@ -12,7 +12,19 @@ router.get('/', (req, res) => {
     WHERE r.status = 'pending'
     ORDER BY r.similarity_score DESC
   `).all();
-  res.json(recs);
+
+  // Flag which recommendations are already in Lidarr (one bulk lookup
+  // instead of one Lidarr call per row) so the UI can hide "+ Lidarr" for
+  // artists that are already there.
+  let lidarrNames = new Set();
+  try {
+    const artists = await lidarr.getAllArtists();
+    lidarrNames = new Set(artists.map(a => a.artistName?.toLowerCase()).filter(Boolean));
+  } catch (err) {
+    console.warn('[Routes] Failed to check Lidarr library:', err.message);
+  }
+
+  res.json(recs.map(r => ({ ...r, in_lidarr: lidarrNames.has(r.artist_name.toLowerCase()) })));
 });
 
 // POST /api/recommendations/:id/add-to-lidarr
