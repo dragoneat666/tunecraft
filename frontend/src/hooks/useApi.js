@@ -31,7 +31,10 @@ export const api = {
 
   // Recommendations
   getRecommendations: () => apiFetch('/recommendations'),
-  addToLidarr: (id) => apiFetch(`/recommendations/${id}/add-to-lidarr`, { method: 'POST' }),
+  // Pass an mbid to add a specific MusicBrainz match the user picked from
+  // getLidarrCandidates, instead of trusting the stored/auto-picked one.
+  addToLidarr: (id, mbid) => apiFetch(`/recommendations/${id}/add-to-lidarr`, { method: 'POST', body: mbid ? { mbid } : undefined }),
+  getLidarrCandidates: (id) => apiFetch(`/recommendations/${id}/lidarr-candidates`),
   dismissRecommendation: (id) => apiFetch(`/recommendations/${id}/dismiss`, { method: 'POST' }),
   addRecToPlaylist: (id, body) => apiFetch(`/recommendations/${id}/add-to-playlist`, { method: 'POST', body }),
 
