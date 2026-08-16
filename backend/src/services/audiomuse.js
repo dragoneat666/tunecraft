@@ -33,7 +33,7 @@ async function getSimilarTracks(artistName, trackTitle, limit = 20) {
   if (!isEnabled()) return [];
   try {
     const data = await audiomuseGet(
-      `/AudioMuseAI/similar_tracks?artist_name=${encodeURIComponent(artistName)}&title=${encodeURIComponent(trackTitle)}&limit=${limit}`
+      `/AudioMuseAI/similar_tracks?artist_name=${encodeURIComponent(artistName)}&track_name=${encodeURIComponent(trackTitle)}&limit=${limit}`
     );
     return (data?.results || []).map(t => ({
       title: t.title,
