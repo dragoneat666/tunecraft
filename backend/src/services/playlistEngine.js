@@ -131,10 +131,17 @@ async function buildPlaylist(playlistId) {
   }
 
   // --- Phase 2: Similar artists ---
+  // How similar (per Last.fm's 0–1 "match" score) an artist has to be
+  // before it gets auto-added to the playlist just because it's already
+  // in Plex. Anything found in Plex but below this bar is NOT auto-added
+  // — it's surfaced instead (with its percentage) so it can be added by
+  // hand, same as an out-of-Plex recommendation.
+  const AUTO_ADD_SIMILARITY_THRESHOLD = 0.6;
+
   // Get similar artists from Last.fm for all seeds
   const allSimilar = new Map();
   for (const seed of seeds) {
-    const similar = await lastfm.getSimilarArtists(seed.artist_name, 20);
+    const similar = await lastfm.getSimilarArtists(seed.artist_name, 50);
     for (const s of similar) {
       if (!allSimilar.has(s.name.toLowerCase()) && !includedArtists.has(s.name.toLowerCase())) {
         allSimilar.set(s.name.toLowerCase(), { name: s.name, mbid: s.mbid, score: s.match });
@@ -145,36 +152,40 @@ async function buildPlaylist(playlistId) {
 
   // Sort by similarity score, and cap how many candidates we bother
   // checking against Plex/Last.fm to keep this from ballooning when a
-  // playlist has several seeds (each contributing up to 20 candidates).
-  const MAX_SIMILAR_TO_CHECK = 30;
+  // playlist has several seeds (each contributing up to 50 candidates).
+  const MAX_SIMILAR_TO_CHECK = 100;
   const sortedSimilar = [...allSimilar.values()]
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_SIMILAR_TO_CHECK);
 
-  // Check EVERY candidate against Plex up front. This is the key fix:
-  // previously this loop bailed out (via `break`) as soon as the track
-  // quota was met, which meant any similar artists after that point never
-  // got checked and silently disappeared instead of showing up as
-  // recommendations. Now we always finish checking the full candidate
-  // list, and only stop *adding tracks* once the quota is hit.
+  // Check EVERY candidate against Plex up front — this is what lets
+  // recommendations get collected fully instead of stopping early once
+  // the auto-add track quota is met. Each candidate lands in one of two
+  // buckets:
+  //   - inPlexSimilar: in Plex AND >= the similarity threshold → gets its
+  //     tracks auto-added to the playlist.
+  //   - similarArtistsFound: everything else (in Plex but below the
+  //     threshold, or not in Plex at all) → surfaced with its percentage
+  //     instead of being silently included or dropped. source is 'plex'
+  //     for the former (already own it, just add it) and 'lastfm' for
+  //     the latter (needs Lidarr).
   const inPlexSimilar = [];
   for (const similar of sortedSimilar) {
     const plexTracks = await plex.searchTracksByArtist(similar.name);
-    if (plexTracks.length > 0) {
-      // Artist already exists in the Plex library — eligible for auto-include
+    const inPlex = plexTracks.length > 0;
+    if (inPlex && similar.score >= AUTO_ADD_SIMILARITY_THRESHOLD) {
       inPlexSimilar.push({ ...similar, plexTracks });
     } else {
-      // Artist not in Plex — surface as a recommendation for Lidarr
       similarArtistsFound.set(similar.name.toLowerCase(), {
         name: similar.name,
         mbid: similar.mbid,
         score: similar.score,
-        source: 'lastfm',
+        source: inPlex ? 'plex' : 'lastfm',
       });
     }
   }
 
-  console.log(`[Engine] ${inPlexSimilar.length} similar artist(s) already in Plex (auto-including), ${similarArtistsFound.size} recommended for Lidarr`);
+  console.log(`[Engine] ${inPlexSimilar.length} similar artist(s) >= ${Math.round(AUTO_ADD_SIMILARITY_THRESHOLD * 100)}% and in Plex (auto-including), ${similarArtistsFound.size} shown as recommendations (in-Plex-but-below-threshold + not-in-Plex)`);
 
   // Split the 40% similar-artist budget across the in-Plex similar artists,
   // weighted by how similar Last.fm says they are to the seed(s).
