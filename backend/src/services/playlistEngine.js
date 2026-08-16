@@ -47,6 +47,20 @@ function shuffle(arr) {
   return a;
 }
 
+// Normalize a track title for matching: trim, lowercase, collapse
+// whitespace, and drop common parenthetical/bracketed tags that don't
+// change what the song actually is ("(Remastered 2019)", "[Live]",
+// "(feat. Someone)", "(Radio Edit)", etc.) — so Last.fm's "Come Original"
+// still lines up with a Plex track titled "Come Original (Album Version)".
+function normalizeTrackTitle(title) {
+  return (title || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\(\[][^)\]]*\)?[\)\]]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Find tracks in Plex for a given artist + track list from Last.fm.
 // If plexTracksOverride is provided, it's reused instead of re-querying
 // Plex (callers that already fetched the artist's Plex tracks to check
@@ -54,26 +68,44 @@ function shuffle(arr) {
 async function findTracksInPlex(artistName, lastfmTracks, plexTracksOverride = null) {
   const plexTracks = plexTracksOverride || await plex.searchTracksByArtist(artistName);
   if (!plexTracks.length) return [];
-  // Build a map of plex tracks by lowercase title for matching
+
+  const toTrackShape = (plexTrack, lastfmPlaycount = 0) => ({
+    ratingKey: plexTrack.ratingKey,
+    title: plexTrack.title,
+    artist: artistName,
+    album: plexTrack.parentTitle,
+    duration: plexTrack.duration,
+    lastfmPlaycount,
+    audiomuseScore: 0,
+  });
+
+  // Build a map of Plex tracks by normalized title for matching against
+  // Last.fm's reported track names.
   const plexMap = new Map(
-    plexTracks.map(t => [t.title?.toLowerCase(), t])
+    plexTracks.map(t => [normalizeTrackTitle(t.title), t])
   );
   const matched = [];
+  const usedRatingKeys = new Set();
   for (const lfmTrack of lastfmTracks) {
-    const titleLower = lfmTrack.name?.toLowerCase();
-    const plexTrack = plexMap.get(titleLower);
-    if (plexTrack) {
-      matched.push({
-        ratingKey: plexTrack.ratingKey,
-        title: plexTrack.title,
-        artist: artistName,
-        album: plexTrack.parentTitle,
-        duration: plexTrack.duration,
-        lastfmPlaycount: lfmTrack.playcount,
-        audiomuseScore: 0,
-      });
+    const plexTrack = plexMap.get(normalizeTrackTitle(lfmTrack.name));
+    if (plexTrack && !usedRatingKeys.has(plexTrack.ratingKey)) {
+      matched.push(toTrackShape(plexTrack, lfmTrack.playcount));
+      usedRatingKeys.add(plexTrack.ratingKey);
     }
   }
+
+  // If none of Last.fm's specific "top tracks" for this artist line up
+  // with any track title actually in Plex (different titling/editions, or
+  // you just own different songs by them than what's globally popular on
+  // Last.fm), don't come back empty-handed when the artist genuinely has
+  // music in the library. Without this, an artist that legitimately
+  // exists in Plex — confirmed by the artist-level lookup that got us
+  // here — could still contribute zero tracks and vanish from both the
+  // playlist AND the recommendations list with no visible trace.
+  if (!matched.length) {
+    return plexTracks.map(t => toTrackShape(t));
+  }
+
   return matched;
 }
 
@@ -209,25 +241,44 @@ async function buildPlaylist(playlistId) {
   // hand, same as an out-of-Plex recommendation.
   const AUTO_ADD_SIMILARITY_THRESHOLD = 0.6;
 
-  // Get similar artists from Last.fm for all seeds
+  // Below this bar, an artist isn't similar enough to be worth surfacing
+  // at all — not auto-added, not even shown as a recommendation. If
+  // something this different is wanted in the playlist anyway, the way in
+  // is adding it as its own seed: it'll get checked against Plex on its
+  // own merits in Phase 1, AND contribute its own similar-artist
+  // candidates here in Phase 2 (which may well score higher against a
+  // seed than they did as a stray recommendation off a different seed).
+  const MIN_SIMILARITY_TO_SHOW = 0.4;
+
+  // How many similar artists to request from Last.fm per seed. Last.fm
+  // returns results already sorted by score (best match first), so this
+  // is a safety cap for unusually well-connected artists rather than a
+  // meaningful cutoff on its own — the MIN_SIMILARITY_TO_SHOW floor below
+  // does the real trimming.
+  const SIMILAR_PER_SEED_LIMIT = 150;
+
+  // Get similar artists from Last.fm for all seeds, dropping anything
+  // below the "worth showing" floor immediately — no point spending a
+  // Plex lookup, or a slot in the recommendations list, on an artist that
+  // will never be surfaced no matter what.
   const allSimilar = new Map();
   for (const seed of seeds) {
-    const similar = await lastfm.getSimilarArtists(seed.artist_name, 50);
+    const similar = await lastfm.getSimilarArtists(seed.artist_name, SIMILAR_PER_SEED_LIMIT);
     for (const s of similar) {
-      if (!allSimilar.has(s.name.toLowerCase()) && !includedArtists.has(s.name.toLowerCase())) {
+      if (
+        s.match >= MIN_SIMILARITY_TO_SHOW &&
+        !allSimilar.has(s.name.toLowerCase()) &&
+        !includedArtists.has(s.name.toLowerCase())
+      ) {
         allSimilar.set(s.name.toLowerCase(), { name: s.name, mbid: s.mbid, score: s.match });
       }
     }
   }
-  console.log(`[Engine] Found ${allSimilar.size} similar artists, checking Plex library...`);
+  console.log(`[Engine] Found ${allSimilar.size} similar artist(s) at or above ${Math.round(MIN_SIMILARITY_TO_SHOW * 100)}% similarity, checking Plex library...`);
 
-  // Sort by similarity score, and cap how many candidates we bother
-  // checking against Plex/Last.fm to keep this from ballooning when a
-  // playlist has several seeds (each contributing up to 50 candidates).
-  const MAX_SIMILAR_TO_CHECK = 100;
-  const sortedSimilar = [...allSimilar.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_SIMILAR_TO_CHECK);
+  // Sort by similarity score so Phase 2's track-budget allocation below
+  // processes the best matches first.
+  const sortedSimilar = [...allSimilar.values()].sort((a, b) => b.score - a.score);
 
   // Check EVERY candidate against Plex up front — this is what lets
   // recommendations get collected fully instead of stopping early once
