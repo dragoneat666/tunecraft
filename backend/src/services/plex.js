@@ -102,7 +102,9 @@ async function getRadioPlaylists() {
 
 // Get items in a playlist
 async function getPlaylistItems(playlistKey) {
-  const data = await plexGet(`${playlistKey}/items`);
+  // playlistKey from Plex already includes /items, strip it to avoid duplication
+  const basePath = playlistKey.replace(/\/items$/, '');
+  const data = await plexGet(`${basePath}/items`);
   return data?.MediaContainer?.Metadata || [];
 }
 
