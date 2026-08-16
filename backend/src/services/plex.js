@@ -64,12 +64,25 @@ async function searchTracksByArtist(artistName) {
 
   for (const lib of libraries) {
     try {
+      // First find the artist
       const encoded = encodeURIComponent(artistName);
-      const data = await plexGet(
-        `/library/sections/${lib.key}/search?query=${encoded}&type=10`
+      const artistData = await plexGet(
+        `/library/sections/${lib.key}/search?query=${encoded}&type=8`
       );
-      const items = data?.MediaContainer?.Metadata || [];
-      tracks.push(...items);
+      const artists = artistData?.MediaContainer?.Metadata || [];
+
+      // For each matching artist, get their tracks
+      for (const artist of artists) {
+        try {
+          const trackData = await plexGet(
+            `/library/sections/${lib.key}/all?type=10&artist.id=${artist.ratingKey}`
+          );
+          const artistTracks = trackData?.MediaContainer?.Metadata || [];
+          tracks.push(...artistTracks);
+        } catch (err) {
+          console.warn(`[Plex] Failed to get tracks for artist ${artist.title}:`, err.message);
+        }
+      }
     } catch (err) {
       console.warn(`[Plex] Search failed in library ${lib.key}:`, err.message);
     }
