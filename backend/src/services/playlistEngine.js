@@ -10,7 +10,6 @@ const lidarr = require('./lidarr');
 function calculateAllocations(seeds, totalTracks) {
   const active = seeds.filter(s => s.weight > 0);
   if (!active.length) return [];
-
   // Normalize weights: weight 5 = 1.0x, weight 10 = 1.5x, weight 1 = 0.5x
   const normalized = active.map(s => ({
     ...s,
@@ -18,12 +17,23 @@ function calculateAllocations(seeds, totalTracks) {
       ? 0.5 + (s.weight - 1) * (0.5 / 4)  // 1→0.5x, 5→1.0x
       : 1.0 + (s.weight - 5) * (0.5 / 5),  // 5→1.0x, 10→1.5x
   }));
-
   const totalMultiplier = normalized.reduce((sum, s) => sum + s.multiplier, 0);
-
   return normalized.map(s => ({
     ...s,
     allocation: Math.max(1, Math.round((s.multiplier / totalMultiplier) * totalTracks)),
+  }));
+}
+
+// Generic proportional allocator, used to split the "similar artist" track
+// budget across whichever similar artists turned out to be in Plex,
+// weighted by their Last.fm similarity score rather than a fixed weight scale.
+function allocateProportionally(items, totalTracks, getWeight) {
+  if (!items.length || totalTracks <= 0) return [];
+  const weights = items.map(item => Math.max(getWeight(item), 0.0001));
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  return items.map((item, idx) => ({
+    ...item,
+    allocation: Math.max(1, Math.round((weights[idx] / totalWeight) * totalTracks)),
   }));
 }
 
@@ -37,16 +47,17 @@ function shuffle(arr) {
   return a;
 }
 
-// Find tracks in Plex for a given artist + track list from Last.fm
-async function findTracksInPlex(artistName, lastfmTracks) {
-  const plexTracks = await plex.searchTracksByArtist(artistName);
+// Find tracks in Plex for a given artist + track list from Last.fm.
+// If plexTracksOverride is provided, it's reused instead of re-querying
+// Plex (callers that already fetched the artist's Plex tracks to check
+// whether the artist exists should pass them in here).
+async function findTracksInPlex(artistName, lastfmTracks, plexTracksOverride = null) {
+  const plexTracks = plexTracksOverride || await plex.searchTracksByArtist(artistName);
   if (!plexTracks.length) return [];
-
   // Build a map of plex tracks by lowercase title for matching
   const plexMap = new Map(
     plexTracks.map(t => [t.title?.toLowerCase(), t])
   );
-
   const matched = [];
   for (const lfmTrack of lastfmTracks) {
     const titleLower = lfmTrack.name?.toLowerCase();
@@ -63,7 +74,6 @@ async function findTracksInPlex(artistName, lastfmTracks) {
       });
     }
   }
-
   return matched;
 }
 
@@ -74,12 +84,10 @@ async function buildPlaylist(playlistId) {
   const seeds = db.prepare(
     'SELECT * FROM playlist_seeds WHERE playlist_id = ? ORDER BY weight DESC'
   ).all(playlistId);
-
   if (!seeds.length) throw new Error(`Playlist ${playlistId} has no seeds`);
 
   console.log(`[Engine] Building playlist "${playlist.name}" with ${seeds.length} seed(s)`);
 
-  const allocations = calculateAllocations(seeds, playlist.track_count);
   const allTracks = [];
   const similarArtistsFound = new Map(); // artists NOT in Plex → recommendations
   const includedArtists = new Set(seeds.map(s => s.artist_name.toLowerCase()));
@@ -90,22 +98,17 @@ async function buildPlaylist(playlistId) {
   const similarTrackTarget = playlist.track_count - seedTrackTarget;
 
   const seedAllocations = calculateAllocations(seeds, seedTrackTarget);
-
   for (const seed of seedAllocations) {
     console.log(`[Engine] Processing seed "${seed.artist_name}" (weight ${seed.weight}, allocation ${seed.allocation})`);
-
     const poolTracks = await lastfm.getArtistTopTracks(
       seed.artist_name,
       playlist.track_pool_size
     );
-
     const plexMatched = await findTracksInPlex(seed.artist_name, poolTracks);
-
     if (!plexMatched.length) {
       console.warn(`[Engine] No Plex matches found for seed "${seed.artist_name}"`);
       continue;
     }
-
     const sampled = shuffle(plexMatched).slice(0, seed.allocation);
     allTracks.push(...sampled);
   }
@@ -121,31 +124,30 @@ async function buildPlaylist(playlistId) {
       }
     }
   }
-
   console.log(`[Engine] Found ${allSimilar.size} similar artists, checking Plex library...`);
 
-  // Sort by similarity score, check each against Plex
-  const sortedSimilar = [...allSimilar.values()].sort((a, b) => b.score - a.score);
-  let similarTracksAdded = 0;
-  const tracksPerSimilarArtist = Math.max(3, Math.floor(similarTrackTarget / Math.min(sortedSimilar.length, 10)));
+  // Sort by similarity score, and cap how many candidates we bother
+  // checking against Plex/Last.fm to keep this from ballooning when a
+  // playlist has several seeds (each contributing up to 20 candidates).
+  const MAX_SIMILAR_TO_CHECK = 30;
+  const sortedSimilar = [...allSimilar.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_SIMILAR_TO_CHECK);
 
+  // Check EVERY candidate against Plex up front. This is the key fix:
+  // previously this loop bailed out (via `break`) as soon as the track
+  // quota was met, which meant any similar artists after that point never
+  // got checked and silently disappeared instead of showing up as
+  // recommendations. Now we always finish checking the full candidate
+  // list, and only stop *adding tracks* once the quota is hit.
+  const inPlexSimilar = [];
   for (const similar of sortedSimilar) {
     const plexTracks = await plex.searchTracksByArtist(similar.name);
-
     if (plexTracks.length > 0) {
-      // Artist is in Plex — get their top tracks from Last.fm and include them
-      console.log(`[Engine] Similar artist "${similar.name}" found in Plex, adding tracks`);
-      const topTracks = await lastfm.getArtistTopTracks(similar.name, playlist.track_pool_size);
-      const matched = await findTracksInPlex(similar.name, topTracks);
-
-      if (matched.length) {
-        const toAdd = shuffle(matched).slice(0, tracksPerSimilarArtist);
-        allTracks.push(...toAdd);
-        similarTracksAdded += toAdd.length;
-        includedArtists.add(similar.name.toLowerCase());
-      }
+      // Artist already exists in the Plex library — eligible for auto-include
+      inPlexSimilar.push({ ...similar, plexTracks });
     } else {
-      // Artist not in Plex — add to recommendations for Lidarr
+      // Artist not in Plex — surface as a recommendation for Lidarr
       similarArtistsFound.set(similar.name.toLowerCase(), {
         name: similar.name,
         mbid: similar.mbid,
@@ -153,9 +155,28 @@ async function buildPlaylist(playlistId) {
         source: 'lastfm',
       });
     }
+  }
 
-    // Stop adding similar artist tracks once we hit the target
+  console.log(`[Engine] ${inPlexSimilar.length} similar artist(s) already in Plex (auto-including), ${similarArtistsFound.size} recommended for Lidarr`);
+
+  // Split the 40% similar-artist budget across the in-Plex similar artists,
+  // weighted by how similar Last.fm says they are to the seed(s).
+  const similarAllocations = allocateProportionally(inPlexSimilar, similarTrackTarget, s => s.score);
+
+  let similarTracksAdded = 0;
+  for (const similar of similarAllocations) {
     if (similarTracksAdded >= similarTrackTarget) break;
+    console.log(`[Engine] Similar artist "${similar.name}" found in Plex, adding up to ${similar.allocation} track(s)`);
+    const topTracks = await lastfm.getArtistTopTracks(similar.name, playlist.track_pool_size);
+    // Reuse the Plex tracks fetched during the existence check above
+    // instead of hitting Plex a second time for the same artist.
+    const matched = await findTracksInPlex(similar.name, topTracks, similar.plexTracks);
+    if (!matched.length) continue;
+    const remaining = similarTrackTarget - similarTracksAdded;
+    const toAdd = shuffle(matched).slice(0, Math.min(similar.allocation, remaining));
+    allTracks.push(...toAdd);
+    similarTracksAdded += toAdd.length;
+    includedArtists.add(similar.name.toLowerCase());
   }
 
   console.log(`[Engine] Total: ${allTracks.length} tracks (${allTracks.length - similarTracksAdded} from seeds, ${similarTracksAdded} from similar artists in Plex)`);
@@ -226,7 +247,6 @@ async function buildPlaylist(playlistId) {
     'SELECT artist_name FROM recommendations WHERE playlist_id = ?'
   ).all(playlistId).map(r => r.artist_name.toLowerCase());
   const existingRecSet = new Set(existingRecs);
-
   const upsertRec = db.prepare(`
     INSERT INTO recommendations (playlist_id, artist_name, artist_mbid, similarity_score, source)
     VALUES (?, ?, ?, ?, ?)
@@ -234,7 +254,6 @@ async function buildPlaylist(playlistId) {
       similarity_score = excluded.similarity_score,
       updated_at = CURRENT_TIMESTAMP
   `);
-
   for (const [, artist] of similarArtistsFound) {
     if (!seedNames.has(artist.name.toLowerCase()) && !existingRecSet.has(artist.name.toLowerCase())) {
       upsertRec.run(playlistId, artist.name, artist.mbid, artist.score, artist.source);
@@ -256,15 +275,12 @@ async function buildPlaylist(playlistId) {
 function parseRadioPlaylistName(name) {
   const prefix = 'Radio:';
   if (!name.startsWith(prefix)) return null;
-
   const content = name.slice(prefix.length).trim();
-
   // Check if it's "Artist and Artist" format
   if (content.includes(' and ')) {
     const parts = content.split(' and ').map(s => s.trim()).filter(Boolean);
     return { type: 'artist', seeds: parts };
   }
-
   // Single artist or genre - we'll try it as an artist first
   return { type: 'artist', seeds: [content] };
 }
@@ -280,7 +296,6 @@ function generatePlaylistName(seeds, genre = null) {
 // Scan Plex for new Radio: playlists and process them
 async function scanForNewRadioPlaylists() {
   console.log('[Engine] Scanning Plex for new Radio: playlists...');
-
   const plexPlaylists = await plex.getRadioPlaylists();
   const managed = db.prepare('SELECT plex_playlist_key, name FROM playlists').all();
   const managedKeys = new Set(managed.map(p => p.plex_playlist_key));
@@ -308,7 +323,6 @@ async function scanForNewRadioPlaylists() {
         INSERT INTO playlists (name, plex_playlist_key, plex_playlist_id, seed_type)
         VALUES (?, ?, ?, ?)
       `).run(plexPlaylist.title, plexPlaylist.key, plexPlaylist.ratingKey, parsed.type);
-
       const playlistId = info.lastInsertRowid;
 
       // Add seeds
@@ -333,7 +347,6 @@ async function scanForNewRadioPlaylists() {
       // Build the playlist
       await buildPlaylist(playlistId);
       results.push({ playlistId, name: plexPlaylist.title });
-
     } catch (err) {
       console.error(`[Engine] Failed to process playlist "${plexPlaylist.title}":`, err.message);
     }
@@ -352,8 +365,8 @@ async function refreshDuePlaylists() {
   `).all(oneWeekAgo);
 
   console.log(`[Engine] ${due.length} playlist(s) due for refresh`);
-
   const results = [];
+
   for (const playlist of due) {
     try {
       console.log(`[Engine] Refreshing "${playlist.name}"...`);
@@ -375,4 +388,5 @@ module.exports = {
   parseRadioPlaylistName,
   generatePlaylistName,
   calculateAllocations,
+  allocateProportionally,
 };
