@@ -67,7 +67,6 @@ async function findTracksInPlex(artistName, lastfmTracks) {
   return matched;
 }
 
-// Build a playlist for a given playlist config
 async function buildPlaylist(playlistId) {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId);
   if (!playlist) throw new Error(`Playlist ${playlistId} not found`);
@@ -82,42 +81,84 @@ async function buildPlaylist(playlistId) {
 
   const allocations = calculateAllocations(seeds, playlist.track_count);
   const allTracks = [];
-  const similarArtistsFound = new Map();
+  const similarArtistsFound = new Map(); // artists NOT in Plex → recommendations
+  const includedArtists = new Set(seeds.map(s => s.artist_name.toLowerCase()));
 
-  for (const seed of allocations) {
-    console.log(`[Engine] Processing artist "${seed.artist_name}" (weight ${seed.weight}, allocation ${seed.allocation})`);
+  // --- Phase 1: Seed artists ---
+  // Reserve 60% of tracks for seeds, 40% for similar artists found in Plex
+  const seedTrackTarget = Math.floor(playlist.track_count * 0.6);
+  const similarTrackTarget = playlist.track_count - seedTrackTarget;
 
-    // Get top N tracks from Last.fm pool
+  const seedAllocations = calculateAllocations(seeds, seedTrackTarget);
+
+  for (const seed of seedAllocations) {
+    console.log(`[Engine] Processing seed "${seed.artist_name}" (weight ${seed.weight}, allocation ${seed.allocation})`);
+
     const poolTracks = await lastfm.getArtistTopTracks(
       seed.artist_name,
       playlist.track_pool_size
     );
 
-    // Find which ones exist in Plex
     const plexMatched = await findTracksInPlex(seed.artist_name, poolTracks);
 
     if (!plexMatched.length) {
-      console.warn(`[Engine] No Plex matches found for "${seed.artist_name}"`);
+      console.warn(`[Engine] No Plex matches found for seed "${seed.artist_name}"`);
       continue;
     }
 
-    // Randomly sample from the pool up to allocation
     const sampled = shuffle(plexMatched).slice(0, seed.allocation);
     allTracks.push(...sampled);
+  }
 
-    // Collect similar artists for recommendations
-    const similar = await lastfm.getSimilarArtists(seed.artist_name, 15);
+  // --- Phase 2: Similar artists ---
+  // Get similar artists from Last.fm for all seeds
+  const allSimilar = new Map();
+  for (const seed of seeds) {
+    const similar = await lastfm.getSimilarArtists(seed.artist_name, 20);
     for (const s of similar) {
-      if (!similarArtistsFound.has(s.name.toLowerCase())) {
-        similarArtistsFound.set(s.name.toLowerCase(), {
-          name: s.name,
-          mbid: s.mbid,
-          score: s.match,
-          source: 'lastfm',
-        });
+      if (!allSimilar.has(s.name.toLowerCase()) && !includedArtists.has(s.name.toLowerCase())) {
+        allSimilar.set(s.name.toLowerCase(), { name: s.name, mbid: s.mbid, score: s.match });
       }
     }
   }
+
+  console.log(`[Engine] Found ${allSimilar.size} similar artists, checking Plex library...`);
+
+  // Sort by similarity score, check each against Plex
+  const sortedSimilar = [...allSimilar.values()].sort((a, b) => b.score - a.score);
+  let similarTracksAdded = 0;
+  const tracksPerSimilarArtist = Math.max(3, Math.floor(similarTrackTarget / Math.min(sortedSimilar.length, 10)));
+
+  for (const similar of sortedSimilar) {
+    const plexTracks = await plex.searchTracksByArtist(similar.name);
+
+    if (plexTracks.length > 0) {
+      // Artist is in Plex — get their top tracks from Last.fm and include them
+      console.log(`[Engine] Similar artist "${similar.name}" found in Plex, adding tracks`);
+      const topTracks = await lastfm.getArtistTopTracks(similar.name, playlist.track_pool_size);
+      const matched = await findTracksInPlex(similar.name, topTracks);
+
+      if (matched.length) {
+        const toAdd = shuffle(matched).slice(0, tracksPerSimilarArtist);
+        allTracks.push(...toAdd);
+        similarTracksAdded += toAdd.length;
+        includedArtists.add(similar.name.toLowerCase());
+      }
+    } else {
+      // Artist not in Plex — add to recommendations for Lidarr
+      similarArtistsFound.set(similar.name.toLowerCase(), {
+        name: similar.name,
+        mbid: similar.mbid,
+        score: similar.score,
+        source: 'lastfm',
+      });
+    }
+
+    // Stop adding similar artist tracks once we hit the target
+    if (similarTracksAdded >= similarTrackTarget) break;
+  }
+
+  console.log(`[Engine] Total: ${allTracks.length} tracks (${allTracks.length - similarTracksAdded} from seeds, ${similarTracksAdded} from similar artists in Plex)`);
 
   if (!allTracks.length) {
     throw new Error(`No tracks found in Plex for playlist "${playlist.name}"`);
