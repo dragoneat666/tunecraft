@@ -24,6 +24,19 @@ function playlistBasePath(playlistKey) {
   return playlistKey.replace(/\/items$/, '');
 }
 
+// Build the "provider" URI Plex expects when adding multiple items to a
+// playlist in one call: ONE uri with all the rating keys comma-joined at
+// the end of a single metadata path, e.g.
+//   server://<machineId>/com.plexapp.plugins.library/library/metadata/100,101,102
+// The previous code built a *separate* full "server://.../metadata/<key>"
+// URI per track and then joined those whole URIs together with commas.
+// Plex's multi-add endpoint doesn't accept a comma-separated list of full
+// URIs — it just doesn't add any items, which is why playlists were
+// coming out completely empty even after the /items path bug was fixed.
+function buildItemsUri(machineId, trackRatingKeys) {
+  return `server://${machineId}/com.plexapp.plugins.library/library/metadata/${trackRatingKeys.join(',')}`;
+}
+
 async function plexGet(path) {
   const url = `${PLEX_URL()}${path}${path.includes('?') ? '&' : '?'}X-Plex-Token=${PLEX_TOKEN()}`;
   const res = await fetch(url, { headers: plexHeaders() });
@@ -137,19 +150,23 @@ async function getMachineId() {
 // Create a new playlist in Plex
 async function createPlaylist(title, trackRatingKeys) {
   const machineId = await getMachineId();
-  const uri = `server://${machineId}/com.plexapp.plugins.library`;
-  const items = trackRatingKeys.map(k => `${uri}/library/metadata/${k}`).join(',');
+  const items = buildItemsUri(machineId, trackRatingKeys);
   const data = await plexPost(
     `/playlists?type=audio&title=${encodeURIComponent(title)}&smart=0&uri=${encodeURIComponent(items)}`
   );
-  return data?.MediaContainer?.Metadata?.[0] || null;
+  const created = data?.MediaContainer?.Metadata?.[0] || null;
+  // Diagnostic: Plex's create-playlist response includes leafCount (item
+  // count) for the new playlist. Logging it here means a mismatch against
+  // the number of tracks we asked for shows up immediately in the logs
+  // instead of only being discovered by looking at an empty playlist.
+  console.log(`[Plex] Created playlist "${title}": ${created?.leafCount ?? 'unknown'} item(s) added (requested ${trackRatingKeys.length})`);
+  return created;
 }
 
 // Replace all items in an existing playlist
 async function updatePlaylistItems(playlistKey, trackRatingKeys) {
   const machineId = await getMachineId();
-  const uri = `server://${machineId}/com.plexapp.plugins.library`;
-  const items = trackRatingKeys.map(k => `${uri}/library/metadata/${k}`).join(',');
+  const items = buildItemsUri(machineId, trackRatingKeys);
   // playlistKey (as stored from Plex's own "key" field) already ends in
   // "/items" — strip it before appending our own, or the request 404s on
   // a doubled path like "/playlists/448012/items/items".
