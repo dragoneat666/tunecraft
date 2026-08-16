@@ -94,14 +94,64 @@ async function findOrCreatePlaylistByName(name, ratingKeys) {
   return plex.createPlaylist(name, ratingKeys);
 }
 
+// If the playlist already exists in Plex, check its current items for any
+// artist that isn't already a seed and add them as one. This is what
+// catches a song dragged into the playlist by hand directly in Plex —
+// without it, the artist is invisible to Tunecraft and the rebuild below
+// (which deletes and replaces every item in the Plex playlist) would just
+// silently wipe the manual addition instead of folding it in. Returns how
+// many new seeds were added.
+async function reconcileManualAdditions(playlist, seeds) {
+  if (!playlist.plex_playlist_key) return 0;
+
+  let existingItems;
+  try {
+    existingItems = await plex.getPlaylistItems(playlist.plex_playlist_key);
+  } catch (err) {
+    console.warn(`[Engine] Couldn't check "${playlist.name}" for manually added artists:`, err.message);
+    return 0;
+  }
+
+  const existingArtists = new Set(existingItems.map(i => i.grandparentTitle).filter(Boolean));
+  const seedNames = new Set(seeds.map(s => s.artist_name.toLowerCase()));
+  const insertSeed = db.prepare(`
+    INSERT OR IGNORE INTO playlist_seeds (playlist_id, artist_name, weight)
+    VALUES (?, ?, 5)
+  `);
+
+  const addedNames = [];
+  for (const artist of existingArtists) {
+    if (!seedNames.has(artist.toLowerCase())) {
+      insertSeed.run(playlist.id, artist);
+      seedNames.add(artist.toLowerCase());
+      addedNames.push(artist);
+    }
+  }
+  const added = addedNames.length;
+
+  if (added) {
+    console.log(`[Engine] Found ${added} artist(s) added by hand in Plex for "${playlist.name}", promoted to seed(s): ${addedNames.join(', ')}`);
+  }
+  return added;
+}
+
 async function buildPlaylist(playlistId) {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId);
   if (!playlist) throw new Error(`Playlist ${playlistId} not found`);
 
-  const seeds = db.prepare(
+  let seeds = db.prepare(
     'SELECT * FROM playlist_seeds WHERE playlist_id = ? ORDER BY weight DESC'
   ).all(playlistId);
   if (!seeds.length) throw new Error(`Playlist ${playlistId} has no seeds`);
+
+  // Pick up any artist added by hand directly in Plex before we rebuild —
+  // see reconcileManualAdditions for why this has to happen first.
+  const manuallyAdded = await reconcileManualAdditions(playlist, seeds);
+  if (manuallyAdded > 0) {
+    seeds = db.prepare(
+      'SELECT * FROM playlist_seeds WHERE playlist_id = ? ORDER BY weight DESC'
+    ).all(playlistId);
+  }
 
   console.log(`[Engine] Building playlist "${playlist.name}" with ${seeds.length} seed(s)`);
 
@@ -348,11 +398,12 @@ function generatePlaylistName(seeds, genre = null) {
   return `Radio: ${names[0]} and ${names[1]}`;
 }
 
-// Scan Plex for new Radio: playlists and process them
+// Scan Plex for new Radio: playlists, and check already-managed playlists
+// for artists added by hand directly in Plex since the last build.
 async function scanForNewRadioPlaylists() {
   console.log('[Engine] Scanning Plex for new Radio: playlists...');
   const plexPlaylists = await plex.getRadioPlaylists();
-  const managed = db.prepare('SELECT plex_playlist_key, name FROM playlists').all();
+  const managed = db.prepare('SELECT id, plex_playlist_key, name FROM playlists').all();
   const managedKeys = new Set(managed.map(p => p.plex_playlist_key));
   const managedNames = new Set(managed.map(p => p.name.toLowerCase()));
 
@@ -360,51 +411,69 @@ async function scanForNewRadioPlaylists() {
     !managedKeys.has(p.key) && !managedNames.has(p.title.toLowerCase())
   );
 
-  if (!newPlaylists.length) {
-    console.log('[Engine] No new Radio: playlists found');
-    return [];
-  }
-
-  console.log(`[Engine] Found ${newPlaylists.length} new Radio: playlist(s)`);
   const results = [];
 
-  for (const plexPlaylist of newPlaylists) {
-    try {
-      const parsed = parseRadioPlaylistName(plexPlaylist.title);
-      if (!parsed) continue;
+  // Brand new "Radio:" playlists Tunecraft hasn't seen before.
+  if (newPlaylists.length) {
+    console.log(`[Engine] Found ${newPlaylists.length} new Radio: playlist(s)`);
 
-      // Create playlist record in DB
-      const info = db.prepare(`
-        INSERT INTO playlists (name, plex_playlist_key, plex_playlist_id, seed_type)
-        VALUES (?, ?, ?, ?)
-      `).run(plexPlaylist.title, plexPlaylist.key, plexPlaylist.ratingKey, parsed.type);
-      const playlistId = info.lastInsertRowid;
+    for (const plexPlaylist of newPlaylists) {
+      try {
+        const parsed = parseRadioPlaylistName(plexPlaylist.title);
+        if (!parsed) continue;
 
-      // Add seeds
-      const insertSeed = db.prepare(`
-        INSERT OR IGNORE INTO playlist_seeds (playlist_id, artist_name, weight)
-        VALUES (?, ?, 5)
-      `);
-      for (const seed of parsed.seeds) {
-        insertSeed.run(playlistId, seed);
-      }
+        // Create playlist record in DB
+        const info = db.prepare(`
+          INSERT INTO playlists (name, plex_playlist_key, plex_playlist_id, seed_type)
+          VALUES (?, ?, ?, ?)
+        `).run(plexPlaylist.title, plexPlaylist.key, plexPlaylist.ratingKey, parsed.type);
+        const playlistId = info.lastInsertRowid;
 
-      // Check if the playlist already has songs — detect new artists added manually
-      const existingItems = await plex.getPlaylistItems(plexPlaylist.key);
-      const existingArtists = new Set(existingItems.map(i => i.grandparentTitle).filter(Boolean));
-      for (const artist of existingArtists) {
-        const seedNames = new Set(parsed.seeds.map(s => s.toLowerCase()));
-        if (!seedNames.has(artist.toLowerCase())) {
-          insertSeed.run(playlistId, artist);
+        // Add seeds
+        const insertSeed = db.prepare(`
+          INSERT OR IGNORE INTO playlist_seeds (playlist_id, artist_name, weight)
+          VALUES (?, ?, 5)
+        `);
+        for (const seed of parsed.seeds) {
+          insertSeed.run(playlistId, seed);
         }
-      }
 
-      // Build the playlist
-      await buildPlaylist(playlistId);
-      results.push({ playlistId, name: plexPlaylist.title });
-    } catch (err) {
-      console.error(`[Engine] Failed to process playlist "${plexPlaylist.title}":`, err.message);
+        // Build the playlist — buildPlaylist itself picks up any artists
+        // already sitting in the Plex playlist (e.g. this one, if it had
+        // tracks in it before Tunecraft found it) as extra seeds.
+        await buildPlaylist(playlistId);
+        results.push({ playlistId, name: plexPlaylist.title });
+      } catch (err) {
+        console.error(`[Engine] Failed to process playlist "${plexPlaylist.title}":`, err.message);
+      }
     }
+  } else {
+    console.log('[Engine] No new Radio: playlists found');
+  }
+
+  // Already-managed playlists: check each for artists added by hand
+  // directly in Plex since the last build (e.g. dragging a track into the
+  // playlist), and rebuild only the ones where something actually changed.
+  // This is what makes "Scan" catch drift on an existing playlist instead
+  // of only ever finding brand-new ones.
+  const alreadyHandled = new Set(results.map(r => r.playlistId));
+  for (const p of managed) {
+    if (alreadyHandled.has(p.id) || !p.plex_playlist_key) continue;
+    try {
+      const seeds = db.prepare('SELECT * FROM playlist_seeds WHERE playlist_id = ?').all(p.id);
+      const added = await reconcileManualAdditions(p, seeds);
+      if (added > 0) {
+        console.log(`[Engine] "${p.name}" has ${added} manually-added artist(s) in Plex, rebuilding...`);
+        const result = await buildPlaylist(p.id);
+        results.push({ playlistId: p.id, name: p.name, manuallyAddedArtists: added, ...result });
+      }
+    } catch (err) {
+      console.error(`[Engine] Failed to check "${p.name}" for manual additions:`, err.message);
+    }
+  }
+
+  if (!results.length) {
+    console.log('[Engine] No new Radio: playlists or manual additions found');
   }
 
   return results;
