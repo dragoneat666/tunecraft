@@ -327,4 +327,10 @@ module.exports = {
   updatePlaylistItems,
   deletePlaylist,
   testConnection,
+  // Exported so other services (playlistEngine's manual-addition detection,
+  // specifically) can compare artist names the same forgiving way this file
+  // already does, instead of falling back to a raw case-only comparison
+  // that misses "The " prefixes and punctuation differences.
+  normalizeArtistName,
+  alnumOnly,
 };

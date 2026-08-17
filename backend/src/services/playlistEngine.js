@@ -146,6 +146,18 @@ async function findOrCreatePlaylistByName(name, ratingKeys) {
 // this playlist on the last build (playlist_tracks, which still holds the
 // previous build's output at this point — it isn't cleared until later in
 // buildPlaylist). Only an artist in neither set is truly new.
+//
+// The comparison itself has to be forgiving, not a raw case-only string
+// match: the artist name Tunecraft wrote to playlist_tracks came from
+// Last.fm, while Plex reports its own "grandparentTitle" for the same
+// track from its own metadata — and those two sources don't always agree
+// on formatting (a leading "The ", or a stylized punctuation character
+// like the non-breaking hyphen in "Blink-182" vs. a plain one). A mismatch
+// there makes an artist Tunecraft itself just added look "manually added"
+// on the very next build, which re-triggers the exact snowball above —
+// this happened in practice once real playlists exercised it, so it's
+// matched to the same normalize/alnum-only comparison plex.js's own
+// artist lookup uses, rather than a plain toLowerCase().
 async function reconcileManualAdditions(playlist, seeds) {
   if (!playlist.plex_playlist_key) return 0;
 
@@ -157,15 +169,24 @@ async function reconcileManualAdditions(playlist, seeds) {
     return 0;
   }
 
-  const existingArtists = new Set(existingItems.map(i => i.grandparentTitle).filter(Boolean));
+  const existingArtists = [...new Set(existingItems.map(i => i.grandparentTitle).filter(Boolean))];
 
-  const knownArtists = new Set(seeds.map(s => s.artist_name.toLowerCase()));
+  const knownNormalized = new Set();
+  const knownAlnum = new Set();
+  const addKnown = (name) => {
+    knownNormalized.add(plex.normalizeArtistName(name));
+    const a = plex.alnumOnly(name);
+    if (a) knownAlnum.add(a);
+  };
+  for (const s of seeds) addKnown(s.artist_name);
   const lastBuildArtists = db.prepare(
     'SELECT DISTINCT artist_name FROM playlist_tracks WHERE playlist_id = ?'
   ).all(playlist.id);
-  for (const row of lastBuildArtists) {
-    knownArtists.add(row.artist_name.toLowerCase());
-  }
+  for (const row of lastBuildArtists) addKnown(row.artist_name);
+
+  const isKnown = (name) =>
+    knownNormalized.has(plex.normalizeArtistName(name)) ||
+    (plex.alnumOnly(name) && knownAlnum.has(plex.alnumOnly(name)));
 
   const insertSeed = db.prepare(`
     INSERT OR IGNORE INTO playlist_seeds (playlist_id, artist_name, weight)
@@ -174,9 +195,9 @@ async function reconcileManualAdditions(playlist, seeds) {
 
   const addedNames = [];
   for (const artist of existingArtists) {
-    if (!knownArtists.has(artist.toLowerCase())) {
+    if (!isKnown(artist)) {
       insertSeed.run(playlist.id, artist);
-      knownArtists.add(artist.toLowerCase());
+      addKnown(artist);
       addedNames.push(artist);
     }
   }
