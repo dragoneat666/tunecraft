@@ -21,6 +21,18 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Log every incoming API request (method, path, source IP). Tunecraft had no
+// request-level logging at all before this — only the business-logic
+// [Engine]/[Plex]/[Lidarr] lines further down the stack — which made it
+// impossible to tell whether something unexpected (a stray API call, a
+// mutation nobody remembers triggering) came from the web UI, a script, or
+// somewhere else entirely. This is intentionally just method/path/IP, not
+// headers or bodies, to stay useful without becoming noise.
+app.use((req, res, next) => {
+  console.log(`[HTTP] ${req.method} ${req.originalUrl} from ${req.ip}`);
+  next();
+});
+
 // API routes
 app.use('/api/playlists', require('./routes/playlists'));
 app.use('/api/recommendations', require('./routes/recommendations'));

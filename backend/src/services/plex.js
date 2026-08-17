@@ -247,8 +247,16 @@ async function getRadioPlaylists() {
 // spawning a duplicate.
 async function findPlaylistByTitle(title) {
   const all = await getAllPlaylists();
-  const match = all.find(p => p.title?.toLowerCase() === title.toLowerCase());
-  return match || null;
+  const matches = all.filter(p => p.title?.toLowerCase() === title.toLowerCase());
+  // If more than one Plex playlist shares this exact title, silently taking
+  // the first one is exactly how a stale/duplicate playlist object could
+  // get adopted without anyone knowing it happened. Surfacing this loudly
+  // means a duplicate shows up in the logs the moment it matters, instead
+  // of only being discoverable by manually counting playlists in Plex.
+  if (matches.length > 1) {
+    console.warn(`[Plex] Found ${matches.length} playlists titled "${title}" (keys: ${matches.map(p => p.key).join(', ')}) — using the first one (${matches[0].key}). The rest are orphaned duplicates sitting in Plex untouched.`);
+  }
+  return matches[0] || null;
 }
 
 // Get items in a playlist
@@ -288,17 +296,38 @@ async function updatePlaylistItems(playlistKey, trackRatingKeys) {
   // "/items" — strip it before appending our own, or the request 404s on
   // a doubled path like "/playlists/448012/items/items".
   const basePath = playlistBasePath(playlistKey);
+  // Every rebuild does a full clear-and-replace rather than an incremental
+  // diff, which means the same playlist ID gets hammered with a full
+  // delete-then-repopulate on every single scan cycle it's touched by.
+  // Logging the before/after here means that churn — and, critically,
+  // whether either half of it ever fails — is visible directly in
+  // Tunecraft's own logs instead of only being inferable from Plex's own
+  // server logs after the fact.
+  console.log(`[Plex] Updating playlist ${basePath}: clearing existing items, then adding ${trackRatingKeys.length} track(s)`);
   // Clear existing items
   await plexDelete(`${basePath}/items`);
   // Add new items
   await plexPut(`${basePath}/items?uri=${encodeURIComponent(items)}`);
+  console.log(`[Plex] Updated playlist ${basePath} successfully (${trackRatingKeys.length} track(s))`);
 }
 
 // Delete a playlist
 async function deletePlaylist(playlistKey) {
+  // This function has exactly one call site in the whole codebase (the
+  // DELETE /api/playlists/:id route, and only when deleteFromPlex=true) —
+  // which makes it the prime suspect any time a Plex playlist vanishes
+  // without anyone remembering deleting it. Logging every call here, with
+  // a stack trace, means if it ever fires from somewhere unexpected (or
+  // more often than a human is actually clicking delete), that's captured
+  // permanently rather than needing to be reconstructed after the fact
+  // from Plex's own logs, which only show that a delete happened — not
+  // what in Tunecraft's code triggered it.
+  console.warn(`[Plex] deletePlaylist() called for key "${playlistKey}"`);
+  console.warn(new Error('[Plex] deletePlaylist() call stack (not a real error, just capturing the caller)').stack);
   // Same "key" quirk as above: deleting ".../items" would only clear the
   // playlist's contents, not the playlist itself, so normalize first.
   await plexDelete(playlistBasePath(playlistKey));
+  console.warn(`[Plex] deletePlaylist() completed for key "${playlistKey}"`);
 }
 
 // Test connection

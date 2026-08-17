@@ -4,36 +4,19 @@ const { db } = require('../db');
 const { buildPlaylist, scanForNewRadioPlaylists, generatePlaylistName } = require('../services/playlistEngine');
 const lastfm = require('../services/lastfm');
 const lidarr = require('../services/lidarr');
-const plex = require('../services/plex');
 
-// Fetch Lidarr's current artist list once and return an "is this artist in
-// Lidarr" checker, so callers can flag recommendations that are already in
-// Lidarr without making one Lidarr API call per row. Lidarr being
-// unreachable shouldn't break the page — just means nothing gets flagged.
-//
-// Uses the same forgiving name comparison plex.js uses for its own
-// lookups (normalize formatting, then fall back to an alphanumerics-only
-// comparison) instead of a raw toLowerCase() equality check — Lidarr's
-// stored name and Last.fm's don't always format an artist name
-// identically, and a mismatch there meant an artist genuinely already in
-// Lidarr could still show an active "+ Lidarr" button.
-async function getLidarrChecker() {
-  const normalized = new Set();
-  const alnum = new Set();
+// Fetch Lidarr's current artist list once and return a lowercase name set,
+// so callers can flag recommendations that are already in Lidarr without
+// making one Lidarr API call per recommendation. Lidarr being unreachable
+// shouldn't break the page — just means nothing gets flagged.
+async function getLidarrNameSet() {
   try {
     const artists = await lidarr.getAllArtists();
-    for (const a of artists) {
-      if (!a.artistName) continue;
-      normalized.add(plex.normalizeArtistName(a.artistName));
-      const key = plex.alnumOnly(a.artistName);
-      if (key) alnum.add(key);
-    }
+    return new Set(artists.map(a => a.artistName?.toLowerCase()).filter(Boolean));
   } catch (err) {
     console.warn('[Routes] Failed to check Lidarr library:', err.message);
+    return new Set();
   }
-  return (name) =>
-    normalized.has(plex.normalizeArtistName(name)) ||
-    (plex.alnumOnly(name) && alnum.has(plex.alnumOnly(name)));
 }
 
 // GET /api/playlists - list all managed playlists
@@ -70,10 +53,10 @@ router.get('/:id', async (req, res) => {
 
   // Flag which recommendations are already in Lidarr so the UI can hide
   // the "+ Lidarr" button for them instead of offering to re-add.
-  const isInLidarr = await getLidarrChecker();
+  const lidarrNames = await getLidarrNameSet();
   const recommendationsWithLidarrStatus = recommendations.map(r => ({
     ...r,
-    in_lidarr: isInLidarr(r.artist_name),
+    in_lidarr: lidarrNames.has(r.artist_name.toLowerCase()),
   }));
 
   const tracks = db.prepare(`
@@ -162,6 +145,14 @@ router.delete('/:id', async (req, res) => {
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
 
   const { deleteFromPlex = false } = req.query;
+
+  // This is the only route in the whole app that can delete a playlist out
+  // of Plex entirely. Logging exactly what was requested, for which
+  // playlist, and from where — before anything actually happens — is what
+  // would let a future "why did this playlist disappear" question get
+  // answered from Tunecraft's own logs instead of needing to go digging
+  // through Plex's server logs after the fact.
+  console.log(`[Routes] DELETE /api/playlists/${req.params.id} ("${playlist.name}", plex_playlist_key=${playlist.plex_playlist_key || 'none'}) — deleteFromPlex=${deleteFromPlex} — from ${req.ip}`);
 
   if (deleteFromPlex === 'true' && playlist.plex_playlist_key) {
     try {

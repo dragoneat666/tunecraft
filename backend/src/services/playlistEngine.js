@@ -418,11 +418,28 @@ async function buildPlaylist(playlistId) {
       await plex.updatePlaylistItems(playlist.plex_playlist_key, ratingKeys);
       plexPlaylist = { key: playlist.plex_playlist_key, ratingKey: playlist.plex_playlist_id };
     } catch (err) {
+      // The full error (not just its message) matters here: this is the
+      // exact moment a stored key going stale forces Tunecraft to fall
+      // back to a by-title lookup — which is also the exact mechanism that
+      // could land on the wrong playlist if more than one shares the same
+      // title. Knowing WHY the stored key failed (404? something else?)
+      // is what would tell us whether Plex is the one invalidating these
+      // keys, versus some other cause.
       console.warn(`[Engine] Stored Plex key for "${playlist.name}" didn't work (${err.message}), looking it up by name instead...`);
+      console.warn(err.stack);
       plexPlaylist = await findOrCreatePlaylistByName(playlist.name, ratingKeys);
     }
   } else {
     plexPlaylist = await findOrCreatePlaylistByName(playlist.name, ratingKeys);
+  }
+
+  // If the Plex playlist object this build ended up writing to isn't the
+  // same one the DB had on file, that's exactly the kind of silent
+  // identity change that can lead to stale/duplicate content getting
+  // picked up later (see reconcileManualAdditions) — surface it loudly
+  // rather than letting the key just quietly update underneath everything.
+  if (plexPlaylist?.key && playlist.plex_playlist_key && plexPlaylist.key !== playlist.plex_playlist_key) {
+    console.warn(`[Engine] Plex playlist key for "${playlist.name}" CHANGED: ${playlist.plex_playlist_key} -> ${plexPlaylist.key}. The old Plex playlist object is now orphaned (if it still exists).`);
   }
 
   // Update DB with Plex playlist info
@@ -533,6 +550,14 @@ async function scanForNewRadioPlaylists() {
   console.log('[Engine] Scanning Plex for new Radio: playlists...');
   const plexPlaylists = await plex.getRadioPlaylists();
   const managed = db.prepare('SELECT id, plex_playlist_key, name FROM playlists').all();
+  // A one-line snapshot of what Tunecraft currently believes each managed
+  // playlist's Plex key is, on every single scan cycle. On its own this
+  // looks unnecessary, but it's what turns "the Plex key changed at some
+  // point" into "the Plex key changed between the 12:00 and 12:15 scan" —
+  // traceable directly from Tunecraft's own logs, without needing to go
+  // spelunking through Plex's server logs to reconstruct when an object's
+  // identity shifted underneath it.
+  console.log(`[Engine] Currently tracking ${managed.length} playlist(s): ${managed.map(p => `"${p.name}" (key=${p.plex_playlist_key || 'none'})`).join(', ') || '(none)'}`);
   const managedKeys = new Set(managed.map(p => p.plex_playlist_key));
   const managedNames = new Set(managed.map(p => p.name.toLowerCase()));
 
