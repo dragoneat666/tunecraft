@@ -194,17 +194,35 @@ async function reconcileManualAdditions(playlist, seeds) {
   `);
 
   const addedNames = [];
+  // Keep the specific track(s) that triggered each promotion, not just the
+  // artist name — the rebuild that immediately follows a promotion adds a
+  // whole batch of that artist's tracks as a normal, legitimate seed
+  // allocation, which buries the one original track among a dozen others
+  // within seconds. If this needs investigating later (what actually put
+  // that track in the playlist — a real manual drag, a Plex metadata
+  // re-match, something else), the specific title/album is the only thing
+  // that can point at the actual file; the artist name alone can't once
+  // it's surrounded by a batch of legitimately-added tracks by the same
+  // artist.
+  const addedDetails = [];
   for (const artist of existingArtists) {
     if (!isKnown(artist)) {
       insertSeed.run(playlist.id, artist);
       addKnown(artist);
       addedNames.push(artist);
+      const examples = existingItems
+        .filter(i => i.grandparentTitle === artist)
+        .slice(0, 5)
+        .map(i => `"${i.title}"${i.parentTitle ? ` (${i.parentTitle})` : ''}${i.ratingKey ? ` [ratingKey ${i.ratingKey}]` : ''}`)
+        .join(', ');
+      addedDetails.push(`${artist}: ${examples}`);
     }
   }
   const added = addedNames.length;
 
   if (added) {
     console.log(`[Engine] Found ${added} artist(s) added by hand in Plex for "${playlist.name}", promoted to seed(s): ${addedNames.join(', ')}`);
+    console.log(`[Engine] Triggering track(s) — ${addedDetails.join(' | ')}`);
   }
   return added;
 }
@@ -528,10 +546,33 @@ async function scanForNewRadioPlaylists() {
   if (newPlaylists.length) {
     console.log(`[Engine] Found ${newPlaylists.length} new Radio: playlist(s)`);
 
+    // Plex doesn't enforce unique playlist titles, so it's possible to end
+    // up with two distinct Plex playlist objects sharing the exact same
+    // "Radio: X" title — e.g. an old one that was deleted from Tunecraft
+    // but left behind in Plex, or simply two made by hand with the same
+    // name. Nothing above filters that out: the "already managed" check
+    // above only excludes names Tunecraft is CURRENTLY tracking, so two
+    // untracked playlists with identical titles both pass it and would
+    // otherwise both get inserted as separate DB rows here. Whichever one
+    // has stale/pre-existing tracks in it would then look, to
+    // reconcileManualAdditions on its very next build, like a playlist
+    // full of "manually added" artists — none of them known, because this
+    // "new" DB row starts with zero seed/track history — and promote all
+    // of them to seeds at once. Guarding against claiming the same name
+    // twice in one pass keeps Tunecraft from ever adopting a duplicate.
+    const claimedNames = new Set();
+
     for (const plexPlaylist of newPlaylists) {
       try {
         const parsed = parseRadioPlaylistName(plexPlaylist.title);
         if (!parsed) continue;
+
+        const nameLower = plexPlaylist.title.toLowerCase();
+        if (claimedNames.has(nameLower)) {
+          console.warn(`[Engine] Skipping "${plexPlaylist.title}" (key ${plexPlaylist.key}) — another Plex playlist with this exact name was already adopted this scan. If this one is a leftover duplicate, delete it directly in Plex.`);
+          continue;
+        }
+        claimedNames.add(nameLower);
 
         // Create playlist record in DB
         const info = db.prepare(`
