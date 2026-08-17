@@ -4,19 +4,36 @@ const { db } = require('../db');
 const { buildPlaylist, scanForNewRadioPlaylists, generatePlaylistName } = require('../services/playlistEngine');
 const lastfm = require('../services/lastfm');
 const lidarr = require('../services/lidarr');
+const plex = require('../services/plex');
 
-// Fetch Lidarr's current artist list once and return a lowercase name set,
-// so callers can flag recommendations that are already in Lidarr without
-// making one Lidarr API call per recommendation. Lidarr being unreachable
-// shouldn't break the page — just means nothing gets flagged.
-async function getLidarrNameSet() {
+// Fetch Lidarr's current artist list once and return an "is this artist in
+// Lidarr" checker, so callers can flag recommendations that are already in
+// Lidarr without making one Lidarr API call per row. Lidarr being
+// unreachable shouldn't break the page — just means nothing gets flagged.
+//
+// Uses the same forgiving name comparison plex.js uses for its own
+// lookups (normalize formatting, then fall back to an alphanumerics-only
+// comparison) instead of a raw toLowerCase() equality check — Lidarr's
+// stored name and Last.fm's don't always format an artist name
+// identically, and a mismatch there meant an artist genuinely already in
+// Lidarr could still show an active "+ Lidarr" button.
+async function getLidarrChecker() {
+  const normalized = new Set();
+  const alnum = new Set();
   try {
     const artists = await lidarr.getAllArtists();
-    return new Set(artists.map(a => a.artistName?.toLowerCase()).filter(Boolean));
+    for (const a of artists) {
+      if (!a.artistName) continue;
+      normalized.add(plex.normalizeArtistName(a.artistName));
+      const key = plex.alnumOnly(a.artistName);
+      if (key) alnum.add(key);
+    }
   } catch (err) {
     console.warn('[Routes] Failed to check Lidarr library:', err.message);
-    return new Set();
   }
+  return (name) =>
+    normalized.has(plex.normalizeArtistName(name)) ||
+    (plex.alnumOnly(name) && alnum.has(plex.alnumOnly(name)));
 }
 
 // GET /api/playlists - list all managed playlists
@@ -53,10 +70,10 @@ router.get('/:id', async (req, res) => {
 
   // Flag which recommendations are already in Lidarr so the UI can hide
   // the "+ Lidarr" button for them instead of offering to re-add.
-  const lidarrNames = await getLidarrNameSet();
+  const isInLidarr = await getLidarrChecker();
   const recommendationsWithLidarrStatus = recommendations.map(r => ({
     ...r,
-    in_lidarr: lidarrNames.has(r.artist_name.toLowerCase()),
+    in_lidarr: isInLidarr(r.artist_name),
   }));
 
   const tracks = db.prepare(`

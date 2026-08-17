@@ -2,6 +2,35 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../db');
 const lidarr = require('../services/lidarr');
+const plex = require('../services/plex');
+
+// Fetch Lidarr's current artist list once and return an "is this artist in
+// Lidarr" checker, so callers can flag recommendations without making one
+// Lidarr API call per row. Uses the same forgiving name comparison plex.js
+// uses for its own lookups (normalize formatting, then fall back to an
+// alphanumerics-only comparison) instead of a raw toLowerCase() equality
+// check — Lidarr's stored name and Last.fm's don't always format an artist
+// name identically, and a mismatch there meant an artist genuinely already
+// in Lidarr (like a "Sugarcult" not yet downloaded but definitely added)
+// could still show an active "+ Lidarr" button.
+async function buildLidarrChecker() {
+  const normalized = new Set();
+  const alnum = new Set();
+  try {
+    const artists = await lidarr.getAllArtists();
+    for (const a of artists) {
+      if (!a.artistName) continue;
+      normalized.add(plex.normalizeArtistName(a.artistName));
+      const key = plex.alnumOnly(a.artistName);
+      if (key) alnum.add(key);
+    }
+  } catch (err) {
+    console.warn('[Routes] Failed to check Lidarr library:', err.message);
+  }
+  return (name) =>
+    normalized.has(plex.normalizeArtistName(name)) ||
+    (plex.alnumOnly(name) && alnum.has(plex.alnumOnly(name)));
+}
 
 // GET /api/recommendations - all pending recommendations across playlists
 router.get('/', async (req, res) => {
@@ -13,18 +42,9 @@ router.get('/', async (req, res) => {
     ORDER BY r.similarity_score DESC
   `).all();
 
-  // Flag which recommendations are already in Lidarr (one bulk lookup
-  // instead of one Lidarr call per row) so the UI can hide "+ Lidarr" for
-  // artists that are already there.
-  let lidarrNames = new Set();
-  try {
-    const artists = await lidarr.getAllArtists();
-    lidarrNames = new Set(artists.map(a => a.artistName?.toLowerCase()).filter(Boolean));
-  } catch (err) {
-    console.warn('[Routes] Failed to check Lidarr library:', err.message);
-  }
+  const isInLidarr = await buildLidarrChecker();
 
-  res.json(recs.map(r => ({ ...r, in_lidarr: lidarrNames.has(r.artist_name.toLowerCase()) })));
+  res.json(recs.map(r => ({ ...r, in_lidarr: isInLidarr(r.artist_name) })));
 });
 
 // GET /api/recommendations/:id/lidarr-candidates - search MusicBrainz (via

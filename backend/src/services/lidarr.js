@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { normalizeArtistName, alnumOnly } = require('./plex');
 
 const LIDARR_URL = () => process.env.LIDARR_URL?.replace(/\/$/, '');
 const LIDARR_API_KEY = () => process.env.LIDARR_API_KEY;
@@ -72,10 +73,22 @@ async function getAllArtists() {
 }
 
 // Check if an artist is already in Lidarr
+// Same forgiving comparison plex.js uses for its own artist lookups,
+// rather than a raw toLowerCase() equality check — Lidarr's stored
+// artistName (pulled from MusicBrainz) and whatever name Tunecraft is
+// checking against (from Last.fm) don't always agree on formatting (a
+// leading "The ", a stylized punctuation character), and a mismatch there
+// meant an artist genuinely already in Lidarr could still show up with an
+// active "+ Lidarr" button in the UI.
 async function isArtistInLibrary(artistName) {
   const artists = await getAllArtists();
-  const nameLower = artistName.toLowerCase();
-  return artists.some(a => a.artistName?.toLowerCase() === nameLower);
+  const target = normalizeArtistName(artistName);
+  const targetAlnum = alnumOnly(artistName);
+  return artists.some(a => {
+    if (!a.artistName) return false;
+    if (normalizeArtistName(a.artistName) === target) return true;
+    return targetAlnum && alnumOnly(a.artistName) === targetAlnum;
+  });
 }
 
 // Add an artist to Lidarr
