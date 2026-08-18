@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../hooks/useApi';
 
@@ -8,10 +8,24 @@ export default function NewPlaylist() {
   const [genre, setGenre] = useState('');
   const [artistInput, setArtistInput] = useState('');
   const [seeds, setSeeds] = useState([]); // { artist_name, weight }
+  // Hardcoded to 100/30 here, ignoring settings.default_track_count/
+  // default_track_pool_size entirely, was the other place this same "system
+  // default isn't actually honored" bug showed up (alongside the backend
+  // routes that had the identical problem). Seeded from the real settings
+  // once they load below instead.
   const [trackCount, setTrackCount] = useState(100);
   const [poolSize, setPoolSize] = useState(30);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    api.getSettings()
+      .then(s => {
+        if (s.default_track_count != null) setTrackCount(parseInt(s.default_track_count, 10));
+        if (s.default_track_pool_size != null) setPoolSize(parseInt(s.default_track_pool_size, 10));
+      })
+      .catch(() => {}); // fall back to the hardcoded defaults above if settings can't be loaded
+  }, []);
 
   function addArtist() {
     const name = artistInput.trim();

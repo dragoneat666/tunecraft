@@ -363,6 +363,11 @@ function PlaylistSettings({ playlist, onUpdate }) {
   const [trackCount, setTrackCount] = useState(playlist.track_count);
   const [poolSize, setPoolSize] = useState(playlist.track_pool_size);
   const [schedule, setSchedule] = useState(playlist.refresh_schedule);
+  // Falls back to 30 when this playlist predates the seed_percentage column
+  // (NULL in the DB) -- matches the same fallback buildPlaylist itself uses,
+  // so what's shown here is always what the playlist is actually building
+  // with, never a misleading blank/zero.
+  const [seedPercentage, setSeedPercentage] = useState(playlist.seed_percentage ?? 30);
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(null);
 
@@ -374,6 +379,7 @@ function PlaylistSettings({ playlist, onUpdate }) {
         track_count: parseInt(trackCount),
         track_pool_size: parseInt(poolSize),
         refresh_schedule: schedule,
+        seed_percentage: parseInt(seedPercentage),
       });
       setSuccess('Settings saved');
       await onUpdate();
@@ -403,6 +409,16 @@ function PlaylistSettings({ playlist, onUpdate }) {
             value={poolSize} onChange={e => setPoolSize(e.target.value)} />
           <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
             Top N songs from Last.fm to sample from per artist (songs are randomly sampled from this pool so the playlist varies on each refresh)
+          </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Seed artist share (%)</label>
+          <input type="number" min="0" max="100" className="form-input"
+            value={seedPercentage} onChange={e => setSeedPercentage(e.target.value)} />
+          <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+            % of this playlist's tracks reserved for the seed artist(s) themselves; the rest goes to similar
+            artists. Overrides the global default for this playlist only — change the global default under
+            Settings to affect other playlists created from now on.
           </div>
         </div>
         <div className="form-group">

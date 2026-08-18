@@ -73,9 +73,16 @@ router.post('/', async (req, res) => {
       seeds, // array of { artist_name, weight? }
       genre,
       seed_type = 'artist',
-      track_count = 100,
-      track_pool_size = 30,
-      refresh_schedule = 'weekly',
+      // track_count/track_pool_size/refresh_schedule used to default to
+      // hardcoded literals (100/30/'weekly') right here, completely
+      // ignoring whatever the settings.default_* values were -- the exact
+      // same bug seed_percentage had before it got fixed. Left un-
+      // destructured with no default now, so "the caller didn't specify
+      // one" is distinguishable from "the caller explicitly wants 30",
+      // and the system default gets read below only when that's the case.
+      track_count,
+      track_pool_size,
+      refresh_schedule,
       seed_percentage, // optional per-playlist override; falls back to the system default below
     } = req.body;
 
@@ -95,6 +102,17 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'seed_percentage must be a number between 0 and 100' });
     }
 
+    // Same snapshot-the-system-default-at-creation-time treatment as
+    // seed_percentage above, for the other three settings that were
+    // silently not honoring their settings.default_* counterpart.
+    const effectiveTrackCount = track_count != null
+      ? parseInt(track_count, 10)
+      : parseInt(getSetting('default_track_count') || '100', 10);
+    const effectiveTrackPoolSize = track_pool_size != null
+      ? parseInt(track_pool_size, 10)
+      : parseInt(getSetting('default_track_pool_size') || '30', 10);
+    const effectiveRefreshSchedule = refresh_schedule || getSetting('default_refresh_schedule') || 'weekly';
+
     // Generate name
     const name = generatePlaylistName(seeds || [], genre);
 
@@ -106,7 +124,7 @@ router.post('/', async (req, res) => {
     const info = db.prepare(`
       INSERT INTO playlists (name, seed_type, genre, track_count, track_pool_size, refresh_schedule, seed_percentage)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(name, seed_type, genre || null, track_count, track_pool_size, refresh_schedule, seedPercentage);
+    `).run(name, seed_type, genre || null, effectiveTrackCount, effectiveTrackPoolSize, effectiveRefreshSchedule, seedPercentage);
 
     const playlistId = info.lastInsertRowid;
 

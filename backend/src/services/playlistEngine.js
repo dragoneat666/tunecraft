@@ -653,16 +653,27 @@ async function scanForNewRadioPlaylists() {
         }
         claimedNames.add(nameLower);
 
-        // Create playlist record in DB. seed_percentage is snapshotted from
-        // the system default at adoption time (see buildPlaylist for why),
-        // so this playlist keeps whatever split was in effect when Plex
-        // first showed it to Tunecraft, even if the system default is
-        // changed later.
+        // Create playlist record in DB. All four of these are snapshotted
+        // from the system defaults at adoption time (see buildPlaylist for
+        // why on seed_percentage specifically), so a playlist keeps
+        // whatever settings were in effect when Plex first showed it to
+        // Tunecraft, even if the system defaults are changed later. Before
+        // this, track_count/track_pool_size/refresh_schedule weren't
+        // specified here at all -- they silently fell through to this
+        // table's fixed CREATE TABLE defaults (100/30/'weekly'), ignoring
+        // settings.default_track_count etc. entirely. This is the path
+        // that actually matters day to day: it's what runs every time a
+        // "Radio: X" playlist gets named directly in Plex, which is how
+        // playlists normally get created (POST /api/playlists, the "New
+        // Playlist" form, is the other, less-used path).
         const defaultSeedPercentage = parseInt(getSetting('default_seed_percentage') || '20', 10);
+        const defaultTrackCount = parseInt(getSetting('default_track_count') || '100', 10);
+        const defaultTrackPoolSize = parseInt(getSetting('default_track_pool_size') || '30', 10);
+        const defaultRefreshSchedule = getSetting('default_refresh_schedule') || 'weekly';
         const info = db.prepare(`
-          INSERT INTO playlists (name, plex_playlist_key, plex_playlist_id, seed_type, seed_percentage)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(plexPlaylist.title, plexPlaylist.key, plexPlaylist.ratingKey, parsed.type, defaultSeedPercentage);
+          INSERT INTO playlists (name, plex_playlist_key, plex_playlist_id, seed_type, seed_percentage, track_count, track_pool_size, refresh_schedule)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(plexPlaylist.title, plexPlaylist.key, plexPlaylist.ratingKey, parsed.type, defaultSeedPercentage, defaultTrackCount, defaultTrackPoolSize, defaultRefreshSchedule);
         const playlistId = info.lastInsertRowid;
 
         // Add seeds
