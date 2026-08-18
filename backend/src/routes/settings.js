@@ -18,6 +18,7 @@ router.put('/', (req, res) => {
     'default_track_pool_size',
     'default_refresh_schedule',
     'default_weight',
+    'default_seed_percentage',
     'audiomuse_enabled',
     'discord_enabled',
     'plex_scan_interval_minutes',

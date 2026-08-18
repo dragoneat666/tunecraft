@@ -1,4 +1,4 @@
-const { db } = require('../db');
+const { db, getSetting } = require('../db');
 const plex = require('./plex');
 const lastfm = require('./lastfm');
 const audiomuse = require('./audiomuse');
@@ -147,41 +147,17 @@ async function findOrCreatePlaylistByName(name, ratingKeys) {
 // previous build's output at this point — it isn't cleared until later in
 // buildPlaylist). Only an artist in neither set is truly new.
 //
-// The FIRST and most important check is by Plex ratingKey, not by artist
-// name at all: a track's ratingKey uniquely identifies that exact file in
-// Plex's library, and playlist_tracks records the ratingKey of every track
-// Tunecraft itself wrote into this playlist on the last build (it still
-// holds the previous build's output at this point — it isn't cleared until
-// later in buildPlaylist). If a live item's ratingKey is in that set,
-// Tunecraft put it there itself and it can never be a manual addition —
-// full stop — no matter what artist name is attached to it live in Plex.
-// This matters because a similar artist's Plex library entry can contain
-// misfiled/mistagged audio (a bad Lidarr import, a wrongly-tagged file):
-// Tunecraft picks a track believing it belongs to similar artist X and
-// records X in playlist_tracks, but the file's own embedded tag — what
-// Plex reports as "grandparentTitle" for that same track — says artist Y.
-// Only comparing by name would see an unrecognized artist Y show up in the
-// live playlist and "promote" it as if someone had dragged a Y song in by
-// hand, even though nothing external happened at all. Keying off ratingKey
-// first sidesteps that entirely: identity of the exact file, not whatever
-// name happens to be embedded in it, is what decides whether Tunecraft put
-// it there.
-//
-// Only tracks whose ratingKey Tunecraft never touched last build are even
-// considered for the name-based check below, which is still needed for the
-// real "artist dragged into Plex by hand" case (a genuinely new file, never
-// part of any Tunecraft build, so it has no ratingKey to match against).
-// That comparison is forgiving, not a raw case-only string match: the
-// artist name Tunecraft wrote to playlist_tracks came from Last.fm, while
-// Plex's own "grandparentTitle" for the same track comes from its own
-// metadata — and those two sources don't always agree on formatting (a
-// leading "The ", or a stylized punctuation character like the
-// non-breaking hyphen in "Blink-182" vs. a plain one). A mismatch there
-// makes an artist Tunecraft itself just added look "manually added" on the
-// very next build, which re-triggers the exact snowball above — this
-// happened in practice once real playlists exercised it, so it's matched
-// to the same normalize/alnum-only comparison plex.js's own artist lookup
-// uses, rather than a plain toLowerCase().
+// The comparison itself has to be forgiving, not a raw case-only string
+// match: the artist name Tunecraft wrote to playlist_tracks came from
+// Last.fm, while Plex reports its own "grandparentTitle" for the same
+// track from its own metadata — and those two sources don't always agree
+// on formatting (a leading "The ", or a stylized punctuation character
+// like the non-breaking hyphen in "Blink-182" vs. a plain one). A mismatch
+// there makes an artist Tunecraft itself just added look "manually added"
+// on the very next build, which re-triggers the exact snowball above —
+// this happened in practice once real playlists exercised it, so it's
+// matched to the same normalize/alnum-only comparison plex.js's own
+// artist lookup uses, rather than a plain toLowerCase().
 async function reconcileManualAdditions(playlist, seeds) {
   if (!playlist.plex_playlist_key) return 0;
 
@@ -193,16 +169,7 @@ async function reconcileManualAdditions(playlist, seeds) {
     return 0;
   }
 
-  // Tracks Tunecraft itself wrote into this playlist on the last build,
-  // keyed by ratingKey. String()'d on both sides because better-sqlite3
-  // reads plex_rating_key back as a string (TEXT column affinity), while
-  // Plex's own API returns ratingKey as a number — without coercion every
-  // lookup below would silently miss.
-  const lastBuildRatingKeys = new Set(
-    db.prepare('SELECT DISTINCT plex_rating_key FROM playlist_tracks WHERE playlist_id = ?')
-      .all(playlist.id)
-      .map(row => String(row.plex_rating_key))
-  );
+  const existingArtists = [...new Set(existingItems.map(i => i.grandparentTitle).filter(Boolean))];
 
   const knownNormalized = new Set();
   const knownAlnum = new Set();
@@ -226,11 +193,6 @@ async function reconcileManualAdditions(playlist, seeds) {
     VALUES (?, ?, 5)
   `);
 
-  // Drop anything Tunecraft itself added last build before even looking at
-  // names — see the ratingKey comment above for why this has to come first.
-  const newItems = existingItems.filter(i => !lastBuildRatingKeys.has(String(i.ratingKey)));
-  const newArtists = [...new Set(newItems.map(i => i.grandparentTitle).filter(Boolean))];
-
   const addedNames = [];
   // Keep the specific track(s) that triggered each promotion, not just the
   // artist name — the rebuild that immediately follows a promotion adds a
@@ -243,12 +205,12 @@ async function reconcileManualAdditions(playlist, seeds) {
   // it's surrounded by a batch of legitimately-added tracks by the same
   // artist.
   const addedDetails = [];
-  for (const artist of newArtists) {
+  for (const artist of existingArtists) {
     if (!isKnown(artist)) {
       insertSeed.run(playlist.id, artist);
       addKnown(artist);
       addedNames.push(artist);
-      const examples = newItems
+      const examples = existingItems
         .filter(i => i.grandparentTitle === artist)
         .slice(0, 5)
         .map(i => `"${i.title}"${i.parentTitle ? ` (${i.parentTitle})` : ''}${i.ratingKey ? ` [ratingKey ${i.ratingKey}]` : ''}`)
@@ -290,11 +252,22 @@ async function buildPlaylist(playlistId) {
   const includedArtists = new Set(seeds.map(s => s.artist_name.toLowerCase()));
 
   // --- Phase 1: Seed artists ---
-  // Reserve 30% of tracks for seeds, 70% for similar artists found in Plex.
-  // (Used to be 60/40 — that skewed playlists too heavily toward repeating
-  // the seed artist itself rather than exploring the similar artists
-  // that's the whole point of "radio.")
-  const seedTrackTarget = Math.floor(playlist.track_count * 0.3);
+  // Reserve seed_percentage% of tracks for seeds, the rest for similar
+  // artists found in Plex. (Used to be a flat 60/40, then 30/70 seed/
+  // similar — each change skewed less toward repeating the seed artist
+  // itself and more toward exploring the similar artists that's the whole
+  // point of "radio.") This is now configurable rather than hardcoded:
+  // playlist.seed_percentage is snapshotted at creation/adoption time from
+  // the settings.default_seed_percentage system default (see routes/
+  // playlists.js and scanForNewRadioPlaylists), and can be overridden per
+  // playlist afterward via PUT /api/playlists/:id. NULL means this
+  // playlist predates the seed_percentage column entirely (the DB
+  // migration in db/index.js deliberately leaves existing rows NULL rather
+  // than backfilling them to the new default) -- 30 keeps those playlists
+  // building exactly as they always have, unaffected by a system-wide
+  // default change.
+  const seedPercentage = playlist.seed_percentage != null ? playlist.seed_percentage : 30;
+  const seedTrackTarget = Math.floor(playlist.track_count * (seedPercentage / 100));
   const similarTrackTarget = playlist.track_count - seedTrackTarget;
 
   const seedAllocations = calculateAllocations(seeds, seedTrackTarget);
@@ -637,11 +610,16 @@ async function scanForNewRadioPlaylists() {
         }
         claimedNames.add(nameLower);
 
-        // Create playlist record in DB
+        // Create playlist record in DB. seed_percentage is snapshotted from
+        // the system default at adoption time (see buildPlaylist for why),
+        // so this playlist keeps whatever split was in effect when Plex
+        // first showed it to Tunecraft, even if the system default is
+        // changed later.
+        const defaultSeedPercentage = parseInt(getSetting('default_seed_percentage') || '20', 10);
         const info = db.prepare(`
-          INSERT INTO playlists (name, plex_playlist_key, plex_playlist_id, seed_type)
-          VALUES (?, ?, ?, ?)
-        `).run(plexPlaylist.title, plexPlaylist.key, plexPlaylist.ratingKey, parsed.type);
+          INSERT INTO playlists (name, plex_playlist_key, plex_playlist_id, seed_type, seed_percentage)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(plexPlaylist.title, plexPlaylist.key, plexPlaylist.ratingKey, parsed.type, defaultSeedPercentage);
         const playlistId = info.lastInsertRowid;
 
         // Add seeds

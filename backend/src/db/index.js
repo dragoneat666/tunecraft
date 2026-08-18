@@ -87,10 +87,29 @@ function initDb() {
       ('default_track_pool_size', '30'),
       ('default_refresh_schedule', 'weekly'),
       ('default_weight', '5'),
+      ('default_seed_percentage', '20'),
       ('audiomuse_enabled', 'false'),
       ('discord_enabled', 'false'),
       ('plex_scan_interval_minutes', '15');
   `);
+
+  // Migration: add playlists.seed_percentage to databases created before
+  // this column existed. CREATE TABLE IF NOT EXISTS above only applies to
+  // brand new databases -- an existing playlists table needs the column
+  // added explicitly, and SQLite has no "ADD COLUMN IF NOT EXISTS", hence
+  // the manual check. Deliberately left NULL (not backfilled to the new
+  // default_seed_percentage) for every playlist that already exists: NULL
+  // is treated by buildPlaylist as "use the pre-this-feature 30% split" so
+  // existing playlists keep behaving exactly as they did before. Only
+  // playlists inserted AFTER this migration (new ones, and ones adopted
+  // fresh after being deleted+recreated in Plex) get a real value written
+  // at insert time, snapshotting whatever default_seed_percentage was set
+  // to at that moment.
+  const playlistColumns = db.prepare('PRAGMA table_info(playlists)').all();
+  if (!playlistColumns.some(c => c.name === 'seed_percentage')) {
+    db.exec('ALTER TABLE playlists ADD COLUMN seed_percentage INTEGER');
+    console.log('[DB] Migrated: added playlists.seed_percentage column');
+  }
 
   console.log('[DB] Database initialized');
 }

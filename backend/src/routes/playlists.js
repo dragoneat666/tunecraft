@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { db } = require('../db');
+const { db, getSetting } = require('../db');
 const { buildPlaylist, scanForNewRadioPlaylists, generatePlaylistName } = require('../services/playlistEngine');
 const lastfm = require('../services/lastfm');
 const lidarr = require('../services/lidarr');
@@ -76,10 +76,23 @@ router.post('/', async (req, res) => {
       track_count = 100,
       track_pool_size = 30,
       refresh_schedule = 'weekly',
+      seed_percentage, // optional per-playlist override; falls back to the system default below
     } = req.body;
 
     if (!seeds?.length && !genre) {
       return res.status(400).json({ error: 'Must provide seeds or genre' });
+    }
+
+    // Percent of track_count reserved for seed-artist tracks (the rest goes
+    // to similar artists found in Plex). Snapshotting the system default at
+    // creation time -- rather than reading it live on every build -- is
+    // what makes a later change to the system default only affect playlists
+    // created/recreated afterward, per how this setting is meant to work.
+    let seedPercentage = seed_percentage != null
+      ? parseInt(seed_percentage, 10)
+      : parseInt(getSetting('default_seed_percentage') || '20', 10);
+    if (Number.isNaN(seedPercentage) || seedPercentage < 0 || seedPercentage > 100) {
+      return res.status(400).json({ error: 'seed_percentage must be a number between 0 and 100' });
     }
 
     // Generate name
@@ -91,9 +104,9 @@ router.post('/', async (req, res) => {
 
     // Insert playlist
     const info = db.prepare(`
-      INSERT INTO playlists (name, seed_type, genre, track_count, track_pool_size, refresh_schedule)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(name, seed_type, genre || null, track_count, track_pool_size, refresh_schedule);
+      INSERT INTO playlists (name, seed_type, genre, track_count, track_pool_size, refresh_schedule, seed_percentage)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(name, seed_type, genre || null, track_count, track_pool_size, refresh_schedule, seedPercentage);
 
     const playlistId = info.lastInsertRowid;
 
@@ -125,16 +138,21 @@ router.put('/:id', (req, res) => {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id);
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
 
-  const { track_count, track_pool_size, refresh_schedule } = req.body;
+  const { track_count, track_pool_size, refresh_schedule, seed_percentage } = req.body;
+
+  if (seed_percentage != null && (seed_percentage < 0 || seed_percentage > 100)) {
+    return res.status(400).json({ error: 'seed_percentage must be between 0 and 100' });
+  }
 
   db.prepare(`
     UPDATE playlists SET
       track_count = COALESCE(?, track_count),
       track_pool_size = COALESCE(?, track_pool_size),
       refresh_schedule = COALESCE(?, refresh_schedule),
+      seed_percentage = COALESCE(?, seed_percentage),
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(track_count, track_pool_size, refresh_schedule, req.params.id);
+  `).run(track_count, track_pool_size, refresh_schedule, seed_percentage, req.params.id);
 
   res.json(db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id));
 });
