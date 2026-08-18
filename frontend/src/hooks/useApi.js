@@ -43,4 +43,7 @@ export const api = {
   updateSettings: (body) => apiFetch('/settings', { method: 'PUT', body }),
   getStatus: () => apiFetch('/settings/status'),
   testService: (service) => apiFetch(`/settings/test/${service}`, { method: 'POST' }),
+
+  // Health / version
+  getHealth: () => apiFetch('/health'),
 };

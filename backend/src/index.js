@@ -5,6 +5,15 @@ const path = require('path');
 const { initDb } = require('./db');
 const { startScheduler } = require('./services/scheduler');
 const { startBot } = require('./services/discord');
+// Single source of truth for the running version: backend/package.json.
+// Reading it here (instead of a hardcoded string, which is what this used
+// to be, and which frontend/src/pages/Settings.jsx separately hardcoded
+// AGAIN as its own copy) means bumping the version in exactly one place --
+// package.json -- on every push is enough to make /api/health, and the
+// Settings page that reads it, reflect what's actually running. This is
+// what "did the new image actually deploy" should have been checkable
+// with, well before it took a container-exec grep to find out for sure.
+const { version: APP_VERSION } = require('../package.json');
 
 // Validate required env vars
 const required = ['PLEX_URL', 'PLEX_TOKEN', 'LASTFM_API_KEY'];
@@ -39,7 +48,7 @@ app.use('/api/recommendations', require('./routes/recommendations'));
 app.use('/api/settings', require('./routes/settings'));
 
 // Health check
-app.get('/api/health', (req, res) => res.json({ ok: true, version: '0.1.0' }));
+app.get('/api/health', (req, res) => res.json({ ok: true, version: APP_VERSION }));
 
 // Serve frontend in production
 const frontendDist = path.join(__dirname, '../frontend/dist');
@@ -61,7 +70,7 @@ async function start() {
   }
 
   app.listen(PORT, () => {
-    console.log(`[Tunecraft] Server running on port ${PORT}`);
+    console.log(`[Tunecraft] Server running on port ${PORT} (version ${APP_VERSION})`);
     console.log(`[Tunecraft] Plex: ${process.env.PLEX_URL}`);
     console.log(`[Tunecraft] AudioMuse: ${process.env.AUDIOMUSE_URL || 'not configured'}`);
     console.log(`[Tunecraft] Discord: ${process.env.DISCORD_BOT_TOKEN ? 'enabled' : 'disabled'}`);

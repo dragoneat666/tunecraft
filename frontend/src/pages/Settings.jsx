@@ -11,6 +11,7 @@ function StatusBadge({ ok }) {
 export default function Settings() {
   const [settings, setSettings] = useState({});
   const [status, setStatus] = useState(null);
+  const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -24,9 +25,16 @@ export default function Settings() {
   async function load() {
     try {
       setLoading(true);
-      const [s, st] = await Promise.all([api.getSettings(), api.getStatus()]);
+      // getHealth() is fetched alongside settings/status rather than
+      // hardcoded in the JSX below (which is what this page used to do --
+      // a separate "Version 0.1.0" string that had no connection to what
+      // was actually running). Reading it live from the backend means this
+      // page always reflects the version the server itself reports, which
+      // is what makes it useful for confirming a deploy actually took.
+      const [s, st, h] = await Promise.all([api.getSettings(), api.getStatus(), api.getHealth()]);
       setSettings(s);
       setStatus(st);
+      setHealth(h);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -180,6 +188,18 @@ export default function Settings() {
           </div>
 
           <div className="form-group">
+            <label className="form-label">Default seed artist share (%)</label>
+            <input type="number" min="0" max="100" className="form-input"
+              value={settings.default_seed_percentage ?? 20}
+              onChange={e => setSettings(s => ({ ...s, default_seed_percentage: e.target.value }))} />
+            <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+              % of each playlist's tracks reserved for the seed artist(s) themselves; the rest goes to similar artists.
+              Only applies to playlists created or re-adopted after this is changed — existing playlists keep whatever
+              split they were built with. Override an individual playlist's split from its own page.
+            </div>
+          </div>
+
+          <div className="form-group">
             <label className="form-label">Plex scan interval (minutes)</label>
             <input type="number" min="5" max="60" className="form-input"
               value={settings.plex_scan_interval_minutes || 15}
@@ -203,7 +223,7 @@ export default function Settings() {
           Playlists refresh every Monday morning with newly downloaded music included.
         </p>
         <div style={{ marginTop: 12, fontSize: 12, color: '#666' }}>
-          Version 0.1.0 · <a href="https://github.com/dragoneat666/tunecraft" style={{ color: '#1db954' }}>GitHub</a>
+          Version {health?.version || '(unknown)'} · <a href="https://github.com/dragoneat666/tunecraft" style={{ color: '#1db954' }}>GitHub</a>
         </div>
       </div>
     </div>
