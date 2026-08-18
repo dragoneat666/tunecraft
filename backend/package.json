@@ -1,6 +1,6 @@
 {
   "name": "tunecraft-backend",
-  "version": "0.1.100",
+  "version": "0.1.101",
   "main": "src/index.js",
   "scripts": {
     "dev": "node --watch src/index.js",

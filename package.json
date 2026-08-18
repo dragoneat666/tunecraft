@@ -1,6 +1,6 @@
 {
   "name": "tunecraft",
-  "version": "0.1.100",
+  "version": "0.1.101",
   "description": "Pandora-style radio playlist generator for Plex, powered by Last.fm and AudioMuse",
   "private": true,
   "workspaces": [
