@@ -147,17 +147,41 @@ async function findOrCreatePlaylistByName(name, ratingKeys) {
 // previous build's output at this point — it isn't cleared until later in
 // buildPlaylist). Only an artist in neither set is truly new.
 //
-// The comparison itself has to be forgiving, not a raw case-only string
-// match: the artist name Tunecraft wrote to playlist_tracks came from
-// Last.fm, while Plex reports its own "grandparentTitle" for the same
-// track from its own metadata — and those two sources don't always agree
-// on formatting (a leading "The ", or a stylized punctuation character
-// like the non-breaking hyphen in "Blink-182" vs. a plain one). A mismatch
-// there makes an artist Tunecraft itself just added look "manually added"
-// on the very next build, which re-triggers the exact snowball above —
-// this happened in practice once real playlists exercised it, so it's
-// matched to the same normalize/alnum-only comparison plex.js's own
-// artist lookup uses, rather than a plain toLowerCase().
+// The FIRST and most important check is by Plex ratingKey, not by artist
+// name at all: a track's ratingKey uniquely identifies that exact file in
+// Plex's library, and playlist_tracks records the ratingKey of every track
+// Tunecraft itself wrote into this playlist on the last build (it still
+// holds the previous build's output at this point — it isn't cleared until
+// later in buildPlaylist). If a live item's ratingKey is in that set,
+// Tunecraft put it there itself and it can never be a manual addition —
+// full stop — no matter what artist name is attached to it live in Plex.
+// This matters because a similar artist's Plex library entry can contain
+// misfiled/mistagged audio (a bad Lidarr import, a wrongly-tagged file):
+// Tunecraft picks a track believing it belongs to similar artist X and
+// records X in playlist_tracks, but the file's own embedded tag — what
+// Plex reports as "grandparentTitle" for that same track — says artist Y.
+// Only comparing by name would see an unrecognized artist Y show up in the
+// live playlist and "promote" it as if someone had dragged a Y song in by
+// hand, even though nothing external happened at all. Keying off ratingKey
+// first sidesteps that entirely: identity of the exact file, not whatever
+// name happens to be embedded in it, is what decides whether Tunecraft put
+// it there.
+//
+// Only tracks whose ratingKey Tunecraft never touched last build are even
+// considered for the name-based check below, which is still needed for the
+// real "artist dragged into Plex by hand" case (a genuinely new file, never
+// part of any Tunecraft build, so it has no ratingKey to match against).
+// That comparison is forgiving, not a raw case-only string match: the
+// artist name Tunecraft wrote to playlist_tracks came from Last.fm, while
+// Plex's own "grandparentTitle" for the same track comes from its own
+// metadata — and those two sources don't always agree on formatting (a
+// leading "The ", or a stylized punctuation character like the
+// non-breaking hyphen in "Blink-182" vs. a plain one). A mismatch there
+// makes an artist Tunecraft itself just added look "manually added" on the
+// very next build, which re-triggers the exact snowball above — this
+// happened in practice once real playlists exercised it, so it's matched
+// to the same normalize/alnum-only comparison plex.js's own artist lookup
+// uses, rather than a plain toLowerCase().
 async function reconcileManualAdditions(playlist, seeds) {
   if (!playlist.plex_playlist_key) return 0;
 
@@ -169,7 +193,16 @@ async function reconcileManualAdditions(playlist, seeds) {
     return 0;
   }
 
-  const existingArtists = [...new Set(existingItems.map(i => i.grandparentTitle).filter(Boolean))];
+  // Tracks Tunecraft itself wrote into this playlist on the last build,
+  // keyed by ratingKey. String()'d on both sides because better-sqlite3
+  // reads plex_rating_key back as a string (TEXT column affinity), while
+  // Plex's own API returns ratingKey as a number — without coercion every
+  // lookup below would silently miss.
+  const lastBuildRatingKeys = new Set(
+    db.prepare('SELECT DISTINCT plex_rating_key FROM playlist_tracks WHERE playlist_id = ?')
+      .all(playlist.id)
+      .map(row => String(row.plex_rating_key))
+  );
 
   const knownNormalized = new Set();
   const knownAlnum = new Set();
@@ -193,6 +226,11 @@ async function reconcileManualAdditions(playlist, seeds) {
     VALUES (?, ?, 5)
   `);
 
+  // Drop anything Tunecraft itself added last build before even looking at
+  // names — see the ratingKey comment above for why this has to come first.
+  const newItems = existingItems.filter(i => !lastBuildRatingKeys.has(String(i.ratingKey)));
+  const newArtists = [...new Set(newItems.map(i => i.grandparentTitle).filter(Boolean))];
+
   const addedNames = [];
   // Keep the specific track(s) that triggered each promotion, not just the
   // artist name — the rebuild that immediately follows a promotion adds a
@@ -205,12 +243,12 @@ async function reconcileManualAdditions(playlist, seeds) {
   // it's surrounded by a batch of legitimately-added tracks by the same
   // artist.
   const addedDetails = [];
-  for (const artist of existingArtists) {
+  for (const artist of newArtists) {
     if (!isKnown(artist)) {
       insertSeed.run(playlist.id, artist);
       addKnown(artist);
       addedNames.push(artist);
-      const examples = existingItems
+      const examples = newItems
         .filter(i => i.grandparentTitle === artist)
         .slice(0, 5)
         .map(i => `"${i.title}"${i.parentTitle ? ` (${i.parentTitle})` : ''}${i.ratingKey ? ` [ratingKey ${i.ratingKey}]` : ''}`)
