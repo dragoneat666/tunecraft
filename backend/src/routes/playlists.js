@@ -4,6 +4,7 @@ const { db, getSetting } = require('../db');
 const { buildPlaylist, scanForNewRadioPlaylists, generatePlaylistName } = require('../services/playlistEngine');
 const lastfm = require('../services/lastfm');
 const lidarr = require('../services/lidarr');
+const listenbrainz = require('../services/listenbrainz');
 
 // Fetch Lidarr's current artist list once and return a lowercase name set,
 // so callers can flag recommendations that are already in Lidarr without
@@ -211,6 +212,57 @@ router.post('/:id/rebuild', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// GET /api/playlists/:id/similar/listenbrainz - on-demand ListenBrainz
+// similar-artist lookup for this playlist's current seeds, for the
+// ListenBrainz sub-tab under Recommendations. Comparison only: nothing here
+// is written to recommendations/seeds, and nothing touches Plex or Lidarr.
+// Only runs when the frontend's Refresh button is clicked -- never
+// automatically, and never as part of buildPlaylist.
+router.get('/:id/similar/listenbrainz', async (req, res) => {
+  const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id);
+  if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
+
+  const seeds = db.prepare(
+    'SELECT * FROM playlist_seeds WHERE playlist_id = ? ORDER BY weight DESC, artist_name'
+  ).all(req.params.id);
+  if (!seeds.length) {
+    return res.json({ results: [], warnings: ['This playlist has no seed artists yet.'] });
+  }
+
+  // name.toLowerCase() -> { name, score, viaSeed }. Merged across every
+  // seed and deduped by name, keeping the highest score seen for a given
+  // artist rather than listing the same artist once per seed that surfaced it.
+  const merged = new Map();
+  const warnings = [];
+
+  for (let i = 0; i < seeds.length; i++) {
+    const seed = seeds[i];
+    // Space out MusicBrainz lookups to respect their ~1 req/sec ask —
+    // no delay before the first one, then one between each subsequent seed.
+    if (i > 0) await listenbrainz.sleep(listenbrainz.MB_RATE_LIMIT_MS);
+
+    const outcome = await listenbrainz.getSimilarArtists(seed.artist_name);
+    if (!outcome) {
+      warnings.push(`Couldn't resolve "${seed.artist_name}" on MusicBrainz — skipped.`);
+      continue;
+    }
+    if (outcome.algorithmFailed) {
+      warnings.push(`ListenBrainz had no similar-artist data for "${outcome.name}".`);
+      continue;
+    }
+    for (const r of outcome.results) {
+      const key = r.name.toLowerCase();
+      const existing = merged.get(key);
+      if (!existing || r.score > existing.score) {
+        merged.set(key, { name: r.name, score: r.score, viaSeed: seed.artist_name });
+      }
+    }
+  }
+
+  const results = [...merged.values()].sort((a, b) => b.score - a.score);
+  res.json({ results, warnings });
 });
 
 // POST /api/playlists/scan - scan Plex for new Radio: playlists

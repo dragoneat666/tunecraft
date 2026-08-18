@@ -38,6 +38,10 @@ export const api = {
   dismissRecommendation: (id) => apiFetch(`/recommendations/${id}/dismiss`, { method: 'POST' }),
   addRecToPlaylist: (id, body) => apiFetch(`/recommendations/${id}/add-to-playlist`, { method: 'POST', body }),
 
+  // ListenBrainz similar-artist comparison (on-demand, comparison-only — see
+  // GET /playlists/:id/similar/listenbrainz)
+  getListenBrainzSimilar: (playlistId) => apiFetch(`/playlists/${playlistId}/similar/listenbrainz`),
+
   // Settings
   getSettings: () => apiFetch('/settings'),
   updateSettings: (body) => apiFetch('/settings', { method: 'PUT', body }),

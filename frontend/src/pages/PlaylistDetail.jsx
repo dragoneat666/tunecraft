@@ -22,9 +22,14 @@ export default function PlaylistDetail() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [pickerRec, setPickerRec] = useState(null); // rec currently being matched against MusicBrainz
+  const [recSource, setRecSource] = useState('lastfm'); // 'lastfm' | 'listenbrainz' sub-tab under Recommendations
+  const [lbData, setLbData] = useState(null); // { results, warnings } | null (not fetched yet this visit)
+  const [lbLoading, setLbLoading] = useState(false);
 
   useEffect(() => {
     load();
+    setRecSource('lastfm');
+    setLbData(null);
   }, [id]);
 
   async function load() {
@@ -136,6 +141,23 @@ export default function PlaylistDetail() {
     load();
   }
 
+  // Fetches fresh ListenBrainz similar-artist data for this playlist's
+  // current seeds. Only ever runs when the Refresh button below is clicked —
+  // there's no auto-fetch on tab open and no persistence, same on-demand
+  // pattern as Last.fm's recommendations only refreshing on Rebuild.
+  async function handleFetchListenBrainz() {
+    try {
+      setLbLoading(true);
+      setError(null);
+      const data = await api.getListenBrainzSimilar(id);
+      setLbData(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLbLoading(false);
+    }
+  }
+
   // Distinct artists actually present in the current track list, with how
   // many tracks each one contributes. Derived from playlist.tracks rather
   // than a separate API call since that data's already fetched.
@@ -235,58 +257,119 @@ export default function PlaylistDetail() {
       {tab === 'recommendations' && (
         <div className="card">
           <div className="card-title">Similar Artist Recommendations</div>
-          <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-            Artists similar to your seeds that are already in your Plex library and matched closely enough
-            get added to this playlist automatically. These didn't — add them as a seed to include them
-            anyway, or send them to Lidarr to get the music.
-          </p>
-          {!playlist.recommendations?.length ? (
-            <p style={{ color: '#888', fontSize: 14 }}>No recommendations yet. Rebuild the playlist to generate them.</p>
-          ) : (
-            playlist.recommendations.map(rec => (
-              <div key={rec.id} className="rec-item">
-                <div className="rec-info">
-                  <div className="rec-name">{rec.artist_name}</div>
-                  <div className="rec-meta">
-                    Similarity: {Math.round((rec.similarity_score || 0) * 100)}%
-                    {' · '}
-                    {rec.source === 'plex' ? 'already in your library' : 'not in your library'}
-                  </div>
-                </div>
-                <div className="rec-actions">
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => handleAddRecToPlaylist(rec.id)}
-                    title="Add as seed to this playlist"
-                  >+ Playlist</button>
-                  {rec.source === 'plex' ? (
-                    // Already sitting in your Plex library — just below the
-                    // similarity threshold to auto-add. There's nothing to
-                    // fetch from Lidarr for music you already own, so only
-                    // offer the manual "+ Playlist" add above.
-                    <span style={{ fontSize: 12, color: '#888' }}>Already in your library</span>
-                  ) : rec.in_lidarr ? (
-                    <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
-                  ) : (
-                    <>
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => handleAddToLidarr(rec.id)}
-                      >+ Lidarr</button>
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+            <button
+              className={`btn btn-sm ${recSource === 'lastfm' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setRecSource('lastfm')}
+            >Last.fm</button>
+            <button
+              className={`btn btn-sm ${recSource === 'listenbrainz' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setRecSource('listenbrainz')}
+            >ListenBrainz</button>
+          </div>
+
+          {recSource === 'lastfm' && (
+            <>
+              <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
+                Artists similar to your seeds that are already in your Plex library and matched closely enough
+                get added to this playlist automatically. These didn't — add them as a seed to include them
+                anyway, or send them to Lidarr to get the music.
+              </p>
+              {!playlist.recommendations?.length ? (
+                <p style={{ color: '#888', fontSize: 14 }}>No recommendations yet. Rebuild the playlist to generate them.</p>
+              ) : (
+                playlist.recommendations.map(rec => (
+                  <div key={rec.id} className="rec-item">
+                    <div className="rec-info">
+                      <div className="rec-name">{rec.artist_name}</div>
+                      <div className="rec-meta">
+                        Similarity: {Math.round((rec.similarity_score || 0) * 100)}%
+                        {' · '}
+                        {rec.source === 'plex' ? 'already in your library' : 'not in your library'}
+                      </div>
+                    </div>
+                    <div className="rec-actions">
                       <button
                         className="btn btn-secondary btn-sm"
-                        title="Multiple artists can share this name — pick the right MusicBrainz match before adding"
-                        onClick={() => setPickerRec(rec)}
-                      >🔍 Pick match</button>
-                    </>
-                  )}
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => handleDismissRec(rec.id)}
-                  >✕</button>
+                        onClick={() => handleAddRecToPlaylist(rec.id)}
+                        title="Add as seed to this playlist"
+                      >+ Playlist</button>
+                      {rec.source === 'plex' ? (
+                        // Already sitting in your Plex library — just below the
+                        // similarity threshold to auto-add. There's nothing to
+                        // fetch from Lidarr for music you already own, so only
+                        // offer the manual "+ Playlist" add above.
+                        <span style={{ fontSize: 12, color: '#888' }}>Already in your library</span>
+                      ) : rec.in_lidarr ? (
+                        <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
+                      ) : (
+                        <>
+                          <button
+                            className="btn btn-primary btn-sm"
+                            onClick={() => handleAddToLidarr(rec.id)}
+                          >+ Lidarr</button>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            title="Multiple artists can share this name — pick the right MusicBrainz match before adding"
+                            onClick={() => setPickerRec(rec)}
+                          >🔍 Pick match</button>
+                        </>
+                      )}
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleDismissRec(rec.id)}
+                      >✕</button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </>
+          )}
+
+          {recSource === 'listenbrainz' && (
+            <>
+              <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
+                Comparison only — nothing here gets added to the playlist, Lidarr, or Plex. Looks up each
+                seed artist's similar artists via MusicBrainz + ListenBrainz on demand. Scores are raw
+                co-occurrence counts, not percentages, so they aren't directly comparable to Last.fm's
+                match scores above.
+              </p>
+              <button className="btn btn-secondary" onClick={handleFetchListenBrainz} disabled={lbLoading}>
+                {lbLoading ? '⏳ Fetching...' : '🔄 Refresh ListenBrainz data'}
+              </button>
+
+              {lbData?.warnings?.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  {lbData.warnings.map((w, i) => (
+                    <p key={i} style={{ fontSize: 12, color: '#e0a052' }}>⚠️ {w}</p>
+                  ))}
                 </div>
-              </div>
-            ))
+              )}
+
+              {!lbData && !lbLoading && (
+                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>
+                  Click Refresh to fetch ListenBrainz's similar artists for this playlist's seeds.
+                </p>
+              )}
+
+              {lbData && !lbData.results.length && !lbData.warnings.length && (
+                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>No results.</p>
+              )}
+
+              {lbData?.results?.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  {lbData.results.map((r, i) => (
+                    <div key={`${r.name}-${i}`} className="rec-item">
+                      <div className="rec-info">
+                        <div className="rec-name">{r.name}</div>
+                        <div className="rec-meta">Score: {r.score} (raw, not a %) · via {r.viaSeed}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
