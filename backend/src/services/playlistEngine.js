@@ -3,6 +3,7 @@ const plex = require('./plex');
 const lastfm = require('./lastfm');
 const audiomuse = require('./audiomuse');
 const lidarr = require('./lidarr');
+const similarityRanking = require('./similarityRanking');
 
 // Calculate how many tracks each seed artist gets based on weight
 // Default weight 5 = equal share
@@ -330,98 +331,115 @@ async function buildPlaylist(playlistId) {
   }
 
   // --- Phase 2: Similar artists ---
-  // How similar (per Last.fm's 0–1 "match" score) an artist has to be
-  // before it gets auto-added to the playlist just because it's already
-  // in Plex. Anything found in Plex but below this bar is NOT auto-added
-  // — it's surfaced instead (with its percentage) so it can be added by
-  // hand, same as an out-of-Plex recommendation.
+  // How similar an artist has to be (0–1 scale, i.e. combined-score % / 100)
+  // before it gets auto-added to the playlist just because it's already in
+  // Plex. Anything found in Plex but below this bar is NOT auto-added —
+  // it's surfaced instead (with its percentage) so it can be added by hand,
+  // same as an out-of-Plex recommendation. This used to be checked against
+  // Last.fm's own 0–1 "match" score; it's now checked against the combined
+  // Last.fm + ListenBrainz + genre score instead (see similarityRanking.js),
+  // kept at the same 60% value the Last.fm-only version had been running at.
   const AUTO_ADD_SIMILARITY_THRESHOLD = 0.6;
 
-  // Below this bar, an artist isn't similar enough to be worth surfacing
-  // at all — not auto-added, not even shown as a recommendation. If
-  // something this different is wanted in the playlist anyway, the way in
-  // is adding it as its own seed: it'll get checked against Plex on its
-  // own merits in Phase 1, AND contribute its own similar-artist
-  // candidates here in Phase 2 (which may well score higher against a
-  // seed than they did as a stray recommendation off a different seed).
+  // Below this bar, an artist isn't similar enough to be worth surfacing at
+  // all — not auto-added, not even shown as a recommendation. If something
+  // this different is wanted in the playlist anyway, the way in is adding it
+  // as its own seed: it'll get checked against Plex on its own merits in
+  // Phase 1, AND contribute its own similar-artist candidates here in
+  // Phase 2.
   const MIN_SIMILARITY_TO_SHOW = 0.4;
 
-  // How many similar artists to request from Last.fm per seed. Last.fm
-  // returns results already sorted by score (best match first), so this
-  // is a safety cap for unusually well-connected artists rather than a
-  // meaningful cutoff on its own — the MIN_SIMILARITY_TO_SHOW floor below
-  // does the real trimming.
-  const SIMILAR_PER_SEED_LIMIT = 150;
+  // Artists banned from this specific playlist (via the Artists tab's ban
+  // button) — excluded from both auto-add and recommendations below.
+  // Banning doesn't retroactively touch Plex on its own; this filter is what
+  // actually keeps a banned artist from coming back on the NEXT rebuild.
+  const bannedArtists = new Set(
+    db.prepare('SELECT artist_name FROM playlist_banned_artists WHERE playlist_id = ?')
+      .all(playlistId)
+      .map(row => row.artist_name.toLowerCase())
+  );
 
-  // Get similar artists from Last.fm for all seeds, dropping anything
-  // below the "worth showing" floor immediately — no point spending a
-  // Plex lookup, or a slot in the recommendations list, on an artist that
-  // will never be surfaced no matter what. Filtered-out candidates are
-  // tracked separately (name → best score seen across seeds) purely for
-  // the diagnostic log below — otherwise there's no way to tell "was this
-  // artist just below the floor" from "Tunecraft never even saw it."
-  const allSimilar = new Map();
-  const filteredBelowFloor = new Map();
-  for (const seed of seeds) {
-    const similar = await lastfm.getSimilarArtists(seed.artist_name, SIMILAR_PER_SEED_LIMIT);
-    for (const s of similar) {
-      const key = s.name.toLowerCase();
-      if (s.match < MIN_SIMILARITY_TO_SHOW) {
-        if (!filteredBelowFloor.has(key) || s.match > filteredBelowFloor.get(key)) {
-          filteredBelowFloor.set(key, s.match);
-        }
-        continue;
-      }
-      if (!allSimilar.has(key) && !includedArtists.has(key)) {
-        allSimilar.set(key, { name: s.name, mbid: s.mbid, score: s.match });
-      }
+  // Combined Last.fm + ListenBrainz + MusicBrainz-genre score for every
+  // candidate similar to any seed (see similarityRanking.js — this is the
+  // same pipeline the "Combined" comparison tab used, now driving real
+  // auto-add/recommendation decisions instead of just being eyeballed).
+  const combined = await similarityRanking.computeCombinedSimilarity(seeds);
+  if (combined.warnings.length) {
+    console.log(`[Engine] Combined similarity warning(s) for "${playlist.name}": ${combined.warnings.join(' | ')}`);
+  }
+
+  // Drop anything already a seed, already banned, or below the "worth
+  // showing" floor — no point spending a Plex lookup, or a slot in the
+  // recommendations list, on an artist that will never be surfaced no
+  // matter what. Filtered-out-by-floor candidates are tracked separately
+  // purely for the diagnostic log below.
+  const sortedSimilar = [];
+  const filteredBelowFloor = [];
+  for (const c of combined.candidates) {
+    const key = c.name.toLowerCase();
+    if (includedArtists.has(key) || bannedArtists.has(key)) continue;
+    const scoreFrac = c.finalScore / 100;
+    if (scoreFrac < MIN_SIMILARITY_TO_SHOW) {
+      filteredBelowFloor.push(c);
+      continue;
     }
+    sortedSimilar.push({ ...c, score: scoreFrac });
   }
-  console.log(`[Engine] Found ${allSimilar.size} similar artist(s) at or above ${Math.round(MIN_SIMILARITY_TO_SHOW * 100)}% similarity, checking Plex library...`);
-  if (filteredBelowFloor.size) {
-    const topFiltered = [...filteredBelowFloor.entries()]
-      .sort((a, b) => b[1] - a[1])
+  console.log(`[Engine] Found ${sortedSimilar.length} similar artist(s) at or above ${Math.round(MIN_SIMILARITY_TO_SHOW * 100)}% combined similarity, checking Plex library...`);
+  if (filteredBelowFloor.length) {
+    const topFiltered = filteredBelowFloor
+      .sort((a, b) => b.finalScore - a.finalScore)
       .slice(0, 15)
-      .map(([name, score]) => `${name} (${Math.round(score * 100)}%)`)
+      .map(c => `${c.name} (${Math.round(c.finalScore)}%)`)
       .join(', ');
-    console.log(`[Engine] ${filteredBelowFloor.size} artist(s) below the ${Math.round(MIN_SIMILARITY_TO_SHOW * 100)}% floor, not shown at all — highest-scoring of those: ${topFiltered}`);
+    console.log(`[Engine] ${filteredBelowFloor.length} artist(s) below the ${Math.round(MIN_SIMILARITY_TO_SHOW * 100)}% floor, not shown at all — highest-scoring of those: ${topFiltered}`);
   }
 
-  // Sort by similarity score so Phase 2's track-budget allocation below
-  // processes the best matches first.
-  const sortedSimilar = [...allSimilar.values()].sort((a, b) => b.score - a.score);
+  // Already sorted best-first by computeCombinedSimilarity, and the filter
+  // loop above preserved that order — no need to re-sort.
 
   // Check EVERY candidate against Plex up front — this is what lets
-  // recommendations get collected fully instead of stopping early once
-  // the auto-add track quota is met. Each candidate lands in one of two
-  // buckets:
+  // recommendations get collected fully instead of stopping early once the
+  // auto-add track quota is met. Each candidate lands in one of two buckets:
   //   - inPlexSimilar: in Plex AND >= the similarity threshold → gets its
   //     tracks auto-added to the playlist.
   //   - similarArtistsFound: everything else (in Plex but below the
   //     threshold, or not in Plex at all) → surfaced with its percentage
-  //     instead of being silently included or dropped. source is 'plex'
-  //     for the former (already own it, just add it) and 'lastfm' for
-  //     the latter (needs Lidarr).
+  //     instead of being silently included or dropped. source is 'plex' for
+  //     the former (already own it, just add it) and 'combined' for the
+  //     latter (needs Lidarr).
+  // Every candidate also carries its combined-score breakdown, so it can be
+  // persisted for the UI's friendly match-breakdown line either way.
   const inPlexSimilar = [];
   for (const similar of sortedSimilar) {
     const plexTracks = await plex.searchTracksByArtist(similar.name);
     const inPlex = plexTracks.length > 0;
+    const breakdown = {
+      lastfmPct: similar.lastfmPct,
+      lbPct: similar.lbPct,
+      bonus: similar.bonus,
+      corroboratingSeeds: similar.corroboratingSeeds,
+      genreChecked: similar.genreChecked,
+      genreMatched: similar.genreMatched,
+      viaSeeds: similar.perSeed.map(p => p.seedName),
+    };
     if (inPlex && similar.score >= AUTO_ADD_SIMILARITY_THRESHOLD) {
-      inPlexSimilar.push({ ...similar, plexTracks });
+      inPlexSimilar.push({ name: similar.name, mbid: similar.mbid, score: similar.score, plexTracks, breakdown });
     } else {
       similarArtistsFound.set(similar.name.toLowerCase(), {
         name: similar.name,
         mbid: similar.mbid,
         score: similar.score,
-        source: inPlex ? 'plex' : 'lastfm',
+        source: inPlex ? 'plex' : 'combined',
+        breakdown,
       });
     }
   }
 
   console.log(`[Engine] ${inPlexSimilar.length} similar artist(s) >= ${Math.round(AUTO_ADD_SIMILARITY_THRESHOLD * 100)}% and in Plex (auto-including), ${similarArtistsFound.size} shown as recommendations (in-Plex-but-below-threshold + not-in-Plex)`);
 
-  // Split the 40% similar-artist budget across the in-Plex similar artists,
-  // weighted by how similar Last.fm says they are to the seed(s).
+  // Split the similar-artist budget across the in-Plex similar artists,
+  // weighted by their combined similarity score against the seed(s).
   const similarAllocations = allocateProportionally(inPlexSimilar, similarTrackTarget, s => s.score);
 
   let similarTracksAdded = 0;
@@ -553,16 +571,65 @@ async function buildPlaylist(playlistId) {
   ).all(playlistId).map(r => r.artist_name.toLowerCase());
   const existingRecSet = new Set(existingRecs);
   const upsertRec = db.prepare(`
-    INSERT INTO recommendations (playlist_id, artist_name, artist_mbid, similarity_score, source)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO recommendations (
+      playlist_id, artist_name, artist_mbid, similarity_score, source,
+      lastfm_pct, lb_pct, corroboration_bonus, corroborating_seeds,
+      genre_checked, genre_matched, via_seeds
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(playlist_id, artist_name) DO UPDATE SET
       similarity_score = excluded.similarity_score,
+      lastfm_pct = excluded.lastfm_pct,
+      lb_pct = excluded.lb_pct,
+      corroboration_bonus = excluded.corroboration_bonus,
+      corroborating_seeds = excluded.corroborating_seeds,
+      genre_checked = excluded.genre_checked,
+      genre_matched = excluded.genre_matched,
+      via_seeds = excluded.via_seeds,
       updated_at = CURRENT_TIMESTAMP
   `);
   for (const [, artist] of similarArtistsFound) {
     if (!seedNames.has(artist.name.toLowerCase()) && !existingRecSet.has(artist.name.toLowerCase())) {
-      upsertRec.run(playlistId, artist.name, artist.mbid, artist.score, artist.source);
+      upsertRec.run(
+        playlistId, artist.name, artist.mbid, artist.score, artist.source,
+        artist.breakdown.lastfmPct, artist.breakdown.lbPct, artist.breakdown.bonus,
+        artist.breakdown.corroboratingSeeds,
+        artist.breakdown.genreChecked ? 1 : 0,
+        artist.breakdown.genreMatched == null ? null : (artist.breakdown.genreMatched ? 1 : 0),
+        artist.breakdown.viaSeeds.join(', ')
+      );
     }
+  }
+
+  // Rewrite playlist_artist_stats from scratch with exactly who's
+  // contributing tracks to this build — seed artists (no similarity
+  // breakdown, they're the source) plus every auto-included similar artist
+  // (with its combined-score breakdown). This is what feeds the Artists
+  // tab's match-breakdown column; unlike recommendations above, it's fully
+  // replaced every build rather than upserted-and-left, since it's meant to
+  // reflect "why is this artist in the playlist right now," not a
+  // persistent suggestion queue.
+  db.prepare('DELETE FROM playlist_artist_stats WHERE playlist_id = ?').run(playlistId);
+  const insertStat = db.prepare(`
+    INSERT INTO playlist_artist_stats (
+      playlist_id, artist_name, is_seed, similarity_score,
+      lastfm_pct, lb_pct, corroboration_bonus, corroborating_seeds,
+      genre_checked, genre_matched, via_seeds
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const seed of seeds) {
+    insertStat.run(playlistId, seed.artist_name, 1, null, null, null, 0, 0, 0, null, null);
+  }
+  for (const similar of inPlexSimilar) {
+    insertStat.run(
+      playlistId, similar.name, 0, similar.score,
+      similar.breakdown.lastfmPct, similar.breakdown.lbPct, similar.breakdown.bonus,
+      similar.breakdown.corroboratingSeeds,
+      similar.breakdown.genreChecked ? 1 : 0,
+      similar.breakdown.genreMatched == null ? null : (similar.breakdown.genreMatched ? 1 : 0),
+      similar.breakdown.viaSeeds.join(', ')
+    );
   }
 
   console.log(`[Engine] Playlist "${playlist.name}" built: ${finalTracks.length} tracks, ${similarArtistsFound.size} similar artists found`);

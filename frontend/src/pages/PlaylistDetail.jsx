@@ -10,6 +10,29 @@ function WeightLabel({ weight }) {
   return <span style={{ color: '#888', fontSize: 12 }}>Normal</span>;
 }
 
+// Builds the friendly "why is this the score it is" line shared by the
+// Recommendations tab and the Artists tab's match column. Works against
+// either a `recommendations` row or a `playlist_artist_stats` row -- both
+// tables use the same column names for the combined-score breakdown (see
+// db/index.js), so one formatter covers both.
+//   "100.0% match - last.fm 90.0% - Listenbrainz: 95.0% - +10 corroboration,
+//    3 seeds · genre ✓ match · via Avenged Sevenfold, Shinedown, Volbeat"
+// Any piece whose data isn't available (older pre-migration rows, a source
+// that had no data for this artist, corroboration from only one seed, genre
+// not checked) is simply omitted rather than shown as a blank/zero.
+function formatMatchLine(row) {
+  const bits = [`${(row.similarity_score * 100).toFixed(1)}% match`];
+  if (row.lastfm_pct != null) bits.push(`last.fm ${row.lastfm_pct.toFixed(1)}%`);
+  if (row.lb_pct != null) bits.push(`Listenbrainz: ${row.lb_pct.toFixed(1)}%`);
+  if (row.corroboration_bonus > 0) bits.push(`+${row.corroboration_bonus} corroboration, ${row.corroborating_seeds} seeds`);
+  let line = bits.join(' - ');
+  const tail = [];
+  if (row.genre_checked) tail.push(`genre ${row.genre_matched ? '✓ match' : '✗ no match (×0.9)'}`);
+  if (row.via_seeds) tail.push(`via ${row.via_seeds}`);
+  if (tail.length) line += (line ? ' · ' : '') + tail.join(' · ');
+  return line;
+}
+
 export default function PlaylistDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -22,17 +45,9 @@ export default function PlaylistDetail() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [pickerRec, setPickerRec] = useState(null); // rec currently being matched against MusicBrainz
-  const [recSource, setRecSource] = useState('lastfm'); // 'lastfm' | 'listenbrainz' | 'combined' sub-tab under Recommendations
-  const [lbData, setLbData] = useState(null); // { results, warnings } | null (not fetched yet this visit)
-  const [lbLoading, setLbLoading] = useState(false);
-  const [combinedData, setCombinedData] = useState(null); // { candidates, seedGenres, warnings } | null
-  const [combinedLoading, setCombinedLoading] = useState(false);
 
   useEffect(() => {
     load();
-    setRecSource('lastfm');
-    setLbData(null);
-    setCombinedData(null);
   }, [id]);
 
   async function load() {
@@ -144,37 +159,18 @@ export default function PlaylistDetail() {
     load();
   }
 
-  // Fetches fresh ListenBrainz similar-artist data for this playlist's
-  // current seeds. Only ever runs when the Refresh button below is clicked —
-  // there's no auto-fetch on tab open and no persistence, same on-demand
-  // pattern as Last.fm's recommendations only refreshing on Rebuild.
-  async function handleFetchListenBrainz() {
+  // Bans an artist from this playlist (Artists tab's ✕ button). Recorded
+  // immediately, but doesn't touch Plex or rebuild the playlist itself --
+  // see the route's own comment for why. Removes them as a seed if they
+  // were one, same as the Seeds tab's ✕.
+  async function handleBanArtist(artistName) {
+    if (!confirm(`Ban "${artistName}" from this playlist? They'll be excluded from future auto-add/recommendations, and removed as a seed if they're currently one. Takes effect on the next rebuild, not immediately.`)) return;
     try {
-      setLbLoading(true);
-      setError(null);
-      const data = await api.getListenBrainzSimilar(id);
-      setLbData(data);
+      await api.banArtist(id, artistName);
+      setSuccess(`Banned "${artistName}" — will drop out of this playlist on the next rebuild.`);
+      await load();
     } catch (err) {
       setError(err.message);
-    } finally {
-      setLbLoading(false);
-    }
-  }
-
-  // Fetches the combined Last.fm + ListenBrainz + genre score for this
-  // playlist's seeds. Same on-demand, comparison-only pattern as the
-  // ListenBrainz tab -- can take a minute or two on a multi-seed playlist
-  // since it makes many paced MusicBrainz calls.
-  async function handleFetchCombined() {
-    try {
-      setCombinedLoading(true);
-      setError(null);
-      const data = await api.getCombinedSimilar(id);
-      setCombinedData(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setCombinedLoading(false);
     }
   }
 
@@ -191,6 +187,22 @@ export default function PlaylistDetail() {
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }, [playlist?.tracks]);
+
+  // playlist_artist_stats rows keyed by lowercased artist name, for the
+  // Artists tab's match-breakdown column. Rewritten every build (see
+  // playlistEngine.js) -- an artist in artistCounts but missing here just
+  // means the playlist hasn't been rebuilt since this feature shipped yet.
+  const artistStatsByName = useMemo(() => {
+    const map = new Map();
+    for (const s of (playlist?.artistStats || [])) {
+      map.set(s.artist_name.toLowerCase(), s);
+    }
+    return map;
+  }, [playlist?.artistStats]);
+
+  const bannedSet = useMemo(() => {
+    return new Set((playlist?.bannedArtists || []).map(a => a.toLowerCase()));
+  }, [playlist?.bannedArtists]);
 
   if (loading) return <div className="loading">Loading...</div>;
   if (!playlist) return <div className="alert alert-error">Playlist not found</div>;
@@ -277,175 +289,60 @@ export default function PlaylistDetail() {
       {tab === 'recommendations' && (
         <div className="card">
           <div className="card-title">Similar Artist Recommendations</div>
-
-          <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-            <button
-              className={`btn btn-sm ${recSource === 'lastfm' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setRecSource('lastfm')}
-            >Last.fm</button>
-            <button
-              className={`btn btn-sm ${recSource === 'listenbrainz' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setRecSource('listenbrainz')}
-            >ListenBrainz</button>
-            <button
-              className={`btn btn-sm ${recSource === 'combined' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setRecSource('combined')}
-            >Combined</button>
-          </div>
-
-          {recSource === 'lastfm' && (
-            <>
-              <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-                Artists similar to your seeds that are already in your Plex library and matched closely enough
-                get added to this playlist automatically. These didn't — add them as a seed to include them
-                anyway, or send them to Lidarr to get the music.
-              </p>
-              {!playlist.recommendations?.length ? (
-                <p style={{ color: '#888', fontSize: 14 }}>No recommendations yet. Rebuild the playlist to generate them.</p>
-              ) : (
-                playlist.recommendations.map(rec => (
-                  <div key={rec.id} className="rec-item">
-                    <div className="rec-info">
-                      <div className="rec-name">{rec.artist_name}</div>
-                      <div className="rec-meta">
-                        Similarity: {Math.round((rec.similarity_score || 0) * 100)}%
-                        {' · '}
-                        {rec.source === 'plex' ? 'already in your library' : 'not in your library'}
-                      </div>
-                    </div>
-                    <div className="rec-actions">
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => handleAddRecToPlaylist(rec.id)}
-                        title="Add as seed to this playlist"
-                      >+ Playlist</button>
-                      {rec.source === 'plex' ? (
-                        // Already sitting in your Plex library — just below the
-                        // similarity threshold to auto-add. There's nothing to
-                        // fetch from Lidarr for music you already own, so only
-                        // offer the manual "+ Playlist" add above.
-                        <span style={{ fontSize: 12, color: '#888' }}>Already in your library</span>
-                      ) : rec.in_lidarr ? (
-                        <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
-                      ) : (
-                        <>
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={() => handleAddToLidarr(rec.id)}
-                          >+ Lidarr</button>
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            title="Multiple artists can share this name — pick the right MusicBrainz match before adding"
-                            onClick={() => setPickerRec(rec)}
-                          >🔍 Pick match</button>
-                        </>
-                      )}
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => handleDismissRec(rec.id)}
-                      >✕</button>
-                    </div>
+          <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
+            Blends Last.fm + ListenBrainz into one score per artist, with a bonus when more than one of your
+            seeds agrees and a MusicBrainz genre sanity check (soft penalty on a mismatch, never a hard
+            cutoff). Artists similar to your seeds that are already in your Plex library and score high
+            enough get added to this playlist automatically — these didn't. Refreshes when you rebuild, when
+            the playlist is created, and on its weekly schedule.
+          </p>
+          {!playlist.recommendations?.length ? (
+            <p style={{ color: '#888', fontSize: 14 }}>No recommendations yet. Rebuild the playlist to generate them.</p>
+          ) : (
+            playlist.recommendations.map(rec => (
+              <div key={rec.id} className="rec-item">
+                <div className="rec-info">
+                  <div className="rec-name">{rec.artist_name}</div>
+                  <div className="rec-meta">
+                    {formatMatchLine(rec)}
+                    {' · '}
+                    {rec.source === 'plex' ? 'already in your library' : 'not in your library'}
                   </div>
-                ))
-              )}
-            </>
-          )}
-
-          {recSource === 'listenbrainz' && (
-            <>
-              <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-                Comparison only — nothing here gets added to the playlist, Lidarr, or Plex. Looks up each
-                seed artist's similar artists via MusicBrainz + ListenBrainz on demand. Scores are raw
-                co-occurrence counts, not percentages, so they aren't directly comparable to Last.fm's
-                match scores above.
-              </p>
-              <button className="btn btn-secondary" onClick={handleFetchListenBrainz} disabled={lbLoading}>
-                {lbLoading ? '⏳ Fetching...' : '🔄 Refresh ListenBrainz data'}
-              </button>
-
-              {lbData?.warnings?.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  {lbData.warnings.map((w, i) => (
-                    <p key={i} style={{ fontSize: 12, color: '#e0a052' }}>⚠️ {w}</p>
-                  ))}
                 </div>
-              )}
-
-              {!lbData && !lbLoading && (
-                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>
-                  Click Refresh to fetch ListenBrainz's similar artists for this playlist's seeds.
-                </p>
-              )}
-
-              {lbData && !lbData.results.length && !lbData.warnings.length && (
-                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>No results.</p>
-              )}
-
-              {lbData?.results?.length > 0 && (
-                <div style={{ marginTop: 16 }}>
-                  {lbData.results.map((r, i) => (
-                    <div key={`${r.name}-${i}`} className="rec-item">
-                      <div className="rec-info">
-                        <div className="rec-name">{r.name}</div>
-                        <div className="rec-meta">Score: {r.score} (raw, not a %) · via {r.viaSeed}</div>
-                      </div>
-                    </div>
-                  ))}
+                <div className="rec-actions">
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleAddRecToPlaylist(rec.id)}
+                    title="Add as seed to this playlist"
+                  >+ Playlist</button>
+                  {rec.source === 'plex' ? (
+                    // Already sitting in your Plex library — just below the
+                    // similarity threshold to auto-add. There's nothing to
+                    // fetch from Lidarr for music you already own, so only
+                    // offer the manual "+ Playlist" add above.
+                    <span style={{ fontSize: 12, color: '#888' }}>Already in your library</span>
+                  ) : rec.in_lidarr ? (
+                    <span style={{ fontSize: 12, color: '#1db954' }}>✓ In Lidarr</span>
+                  ) : (
+                    <>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleAddToLidarr(rec.id)}
+                      >+ Lidarr</button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        title="Multiple artists can share this name — pick the right MusicBrainz match before adding"
+                        onClick={() => setPickerRec(rec)}
+                      >🔍 Pick match</button>
+                    </>
+                  )}
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleDismissRec(rec.id)}
+                  >✕</button>
                 </div>
-              )}
-            </>
-          )}
-
-          {recSource === 'combined' && (
-            <>
-              <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-                Comparison only — nothing here gets added to the playlist, Lidarr, or Plex, and it doesn't
-                affect what Rebuild does. Blends Last.fm + ListenBrainz into one score per artist, adds a
-                small bonus when more than one of your seeds agrees, and checks MusicBrainz genre tags as a
-                sanity check (soft penalty on a mismatch, never a hard cutoff). Can take a minute or two to
-                run on a playlist with multiple seeds.
-              </p>
-              <button className="btn btn-secondary" onClick={handleFetchCombined} disabled={combinedLoading}>
-                {combinedLoading ? '⏳ Fetching... (can take a minute or two)' : '🔄 Refresh combined score'}
-              </button>
-
-              {combinedData?.warnings?.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  {combinedData.warnings.map((w, i) => (
-                    <p key={i} style={{ fontSize: 12, color: '#e0a052' }}>⚠️ {w}</p>
-                  ))}
-                </div>
-              )}
-
-              {!combinedData && !combinedLoading && (
-                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>
-                  Click Refresh to compute the combined score for this playlist's seeds.
-                </p>
-              )}
-
-              {combinedData && !combinedData.candidates.length && !combinedData.warnings.length && (
-                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>No results.</p>
-              )}
-
-              {combinedData?.candidates?.length > 0 && (
-                <div style={{ marginTop: 16 }}>
-                  {combinedData.candidates.map((c, i) => (
-                    <div key={`${c.name}-${i}`} className="rec-item">
-                      <div className="rec-info">
-                        <div className="rec-name">{c.name}</div>
-                        <div className="rec-meta">
-                          {c.finalScore.toFixed(1)}% match
-                          {' · '}base {c.preGenreScore.toFixed(1)}%
-                          {c.bonus > 0 && ` (+${c.bonus} corroboration, ${c.corroboratingSeeds} seeds)`}
-                          {' · '}genre {c.genreChecked ? (c.genreMatched ? '✓ match' : '✗ no match (×0.9)') : 'not checked'}
-                          {' · '}via {c.perSeed.map(p => p.seedName).join(', ')}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
+              </div>
+            ))
           )}
         </div>
       )}
@@ -489,24 +386,48 @@ export default function PlaylistDetail() {
         <div className="card">
           <div className="card-title">Artists in This Playlist</div>
           <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-            Every artist currently contributing tracks to this playlist (seed artists plus auto-included similar artists).
+            Every artist currently contributing tracks to this playlist (seed artists plus auto-included
+            similar artists). Banning an artist removes them as a seed (if they're currently one) and
+            excludes them from future auto-add/recommendations — it takes effect on the next rebuild, not
+            immediately.
           </p>
           {!artistCounts.length ? (
             <p style={{ color: '#888', fontSize: 14 }}>No tracks yet. Rebuild the playlist to populate it.</p>
           ) : (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-              {artistCounts.map(a => (
-                <div
-                  key={a.name}
-                  style={{ padding: '8px 14px', background: '#1a1a1a', borderRadius: 8, fontSize: 14 }}
-                >
-                  <span style={{ fontWeight: 500 }}>{a.name}</span>
-                  <span style={{ color: '#888', marginLeft: 8, fontSize: 12 }}>
-                    {a.count} track{a.count !== 1 ? 's' : ''}
-                  </span>
+            artistCounts.map(a => {
+              const stat = artistStatsByName.get(a.name.toLowerCase());
+              const banned = bannedSet.has(a.name.toLowerCase());
+              return (
+                <div key={a.name} className="rec-item">
+                  <div className="rec-info">
+                    <div className="rec-name">
+                      {a.name}
+                      <span style={{ color: '#888', marginLeft: 8, fontSize: 12, fontWeight: 400 }}>
+                        {a.count} track{a.count !== 1 ? 's' : ''}
+                      </span>
+                      {banned && (
+                        <span style={{ color: '#e05252', marginLeft: 8, fontSize: 12, fontWeight: 400 }}>
+                          🚫 banned — removed next rebuild
+                        </span>
+                      )}
+                    </div>
+                    <div className="rec-meta">
+                      {stat
+                        ? (stat.is_seed ? 'Seed artist' : formatMatchLine(stat))
+                        : 'No match data yet — rebuild to compute it'}
+                    </div>
+                  </div>
+                  <div className="rec-actions">
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      disabled={banned}
+                      onClick={() => handleBanArtist(a.name)}
+                      title="Ban this artist from this playlist"
+                    >{banned ? 'Banned' : '✕ Ban'}</button>
+                  </div>
                 </div>
-              ))}
-            </div>
+              );
+            })
           )}
         </div>
       )}

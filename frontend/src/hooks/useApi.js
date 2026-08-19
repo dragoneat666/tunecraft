@@ -38,6 +38,12 @@ export const api = {
   dismissRecommendation: (id) => apiFetch(`/recommendations/${id}/dismiss`, { method: 'POST' }),
   addRecToPlaylist: (id, body) => apiFetch(`/recommendations/${id}/add-to-playlist`, { method: 'POST', body }),
 
+  // Ban an artist from a playlist (Artists tab). Removes them as a seed if
+  // they were one and clears any pending recommendation — takes effect on
+  // Plex on the playlist's next rebuild, not immediately.
+  banArtist: (playlistId, artistName) =>
+    apiFetch(`/playlists/${playlistId}/banned-artists`, { method: 'POST', body: { artist_name: artistName } }),
+
   // ListenBrainz similar-artist comparison (on-demand, comparison-only — see
   // GET /playlists/:id/similar/listenbrainz)
   getListenBrainzSimilar: (playlistId) => apiFetch(`/playlists/${playlistId}/similar/listenbrainz`),

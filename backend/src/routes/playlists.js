@@ -65,7 +65,21 @@ router.get('/:id', async (req, res) => {
     SELECT * FROM playlist_tracks WHERE playlist_id = ? ORDER BY added_at DESC
   `).all(req.params.id);
 
-  res.json({ ...playlist, seeds, recommendations: recommendationsWithLidarrStatus, tracks });
+  // Why each artist currently contributing tracks is in the playlist (seed
+  // vs. auto-included similar artist, plus its combined-score breakdown for
+  // the latter) — rewritten every build, see playlistEngine.buildPlaylist.
+  const artistStats = db.prepare(
+    'SELECT * FROM playlist_artist_stats WHERE playlist_id = ?'
+  ).all(req.params.id);
+
+  // Artists banned from this playlist — the Artists tab uses this to grey
+  // out/label an artist that's been banned but hasn't dropped out of the
+  // playlist yet (ban takes effect on the next rebuild, not immediately).
+  const bannedArtists = db.prepare(
+    'SELECT artist_name FROM playlist_banned_artists WHERE playlist_id = ? ORDER BY artist_name'
+  ).all(req.params.id).map(r => r.artist_name);
+
+  res.json({ ...playlist, seeds, recommendations: recommendationsWithLidarrStatus, tracks, artistStats, bannedArtists });
 });
 
 // POST /api/playlists - create a new playlist
@@ -357,6 +371,53 @@ router.put('/:id/seeds/:seedId', (req, res) => {
 router.delete('/:id/seeds/:seedId', (req, res) => {
   db.prepare('DELETE FROM playlist_seeds WHERE id = ? AND playlist_id = ?')
     .run(req.params.seedId, req.params.id);
+  res.json({ ok: true });
+});
+
+// POST /api/playlists/:id/banned-artists - ban an artist from this playlist
+// (Artists tab's ✕ button). Recorded immediately, but does NOT touch Plex or
+// trigger a rebuild itself — buildPlaylist checks this table and excludes
+// banned artists from auto-add/recommendations, so it only actually strips
+// their tracks out of Plex the next time this playlist rebuilds (manual
+// click or the weekly schedule), not from this click.
+//
+// If the banned artist is currently one of this playlist's seeds, it's also
+// removed as a seed here (same as clicking ✕ on the Seeds tab) — otherwise
+// it would stay a seed and keep contributing tracks despite being "banned."
+// Any pending recommendation for this artist is deleted too, so it
+// disappears from the Recommendations tab right away instead of lingering
+// until the next rebuild cleans it up.
+router.post('/:id/banned-artists', (req, res) => {
+  const { artist_name } = req.body;
+  if (!artist_name) return res.status(400).json({ error: 'artist_name required' });
+
+  const playlist = db.prepare('SELECT id FROM playlists WHERE id = ?').get(req.params.id);
+  if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
+
+  db.prepare(`
+    INSERT INTO playlist_banned_artists (playlist_id, artist_name)
+    VALUES (?, ?)
+    ON CONFLICT(playlist_id, artist_name) DO NOTHING
+  `).run(req.params.id, artist_name);
+
+  const removedSeed = db.prepare(
+    'DELETE FROM playlist_seeds WHERE playlist_id = ? AND LOWER(artist_name) = LOWER(?)'
+  ).run(req.params.id, artist_name).changes > 0;
+
+  db.prepare(
+    'DELETE FROM recommendations WHERE playlist_id = ? AND LOWER(artist_name) = LOWER(?)'
+  ).run(req.params.id, artist_name);
+
+  res.status(201).json({ ok: true, removedSeed });
+});
+
+// DELETE /api/playlists/:id/banned-artists/:artistName - undo a ban. Not
+// currently wired into the UI, but kept as a safety valve for reversing an
+// accidental ban without needing direct DB access.
+router.delete('/:id/banned-artists/:artistName', (req, res) => {
+  db.prepare(
+    'DELETE FROM playlist_banned_artists WHERE playlist_id = ? AND LOWER(artist_name) = LOWER(?)'
+  ).run(req.params.id, req.params.artistName);
   res.json({ ok: true });
 });
 

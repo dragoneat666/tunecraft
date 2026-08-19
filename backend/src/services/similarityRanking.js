@@ -142,6 +142,14 @@ async function computeCombinedSimilarity(seeds) {
       name: candidate.name,
       mbid: candidate.mbid,
       perSeed: candidate.perSeed,
+      // Top-level convenience copies of the best-scoring seed's per-source
+      // percentages, so callers that just want "what did last.fm/ListenBrainz
+      // say" for a friendly display don't have to dig into perSeed
+      // themselves (e.g. playlistEngine.js persisting these into
+      // recommendations/playlist_artist_stats for the UI's match-breakdown
+      // line). Can still be null if that source had no data for the best seed.
+      lastfmPct: best.lastfmPct,
+      lbPct: best.lbPct,
       corroboratingSeeds,
       bonus,
       preGenreScore,

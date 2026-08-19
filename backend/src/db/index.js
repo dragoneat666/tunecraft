@@ -53,15 +53,28 @@ function initDb() {
       UNIQUE(playlist_id, artist_name)
     );
 
-    -- Similar artist recommendations (shown in UI for Lidarr additions)
+    -- Similar artist recommendations (shown in UI for Lidarr additions).
+    -- The lastfm_pct/lb_pct/corroboration_bonus/corroborating_seeds/
+    -- genre_checked/genre_matched/via_seeds columns hold the combined-score
+    -- breakdown (see services/similarityRanking.js) so the UI can show a
+    -- friendly "why is this the score it is" line -- added via the manual
+    -- ALTER TABLE migration below for databases that predate them, left NULL
+    -- on existing rows (same pattern as playlists.seed_percentage).
     CREATE TABLE IF NOT EXISTS recommendations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
       artist_name TEXT NOT NULL,
       artist_mbid TEXT,
       similarity_score REAL,
-      source TEXT NOT NULL DEFAULT 'lastfm', -- 'lastfm' | 'audiomuse'
+      source TEXT NOT NULL DEFAULT 'lastfm', -- 'combined' | 'plex' | 'audiomuse' (older rows may say 'lastfm')
       status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'added_to_lidarr' | 'dismissed'
+      lastfm_pct REAL,
+      lb_pct REAL,
+      corroboration_bonus REAL DEFAULT 0,
+      corroborating_seeds INTEGER DEFAULT 0,
+      genre_checked INTEGER DEFAULT 0,
+      genre_matched INTEGER,
+      via_seeds TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(playlist_id, artist_name)
@@ -79,6 +92,44 @@ function initDb() {
       lastfm_playcount INTEGER,
       audiomuse_score REAL,
       added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Why each artist CURRENTLY contributing tracks to a playlist is there --
+    -- rewritten from scratch on every buildPlaylist() call, unlike
+    -- recommendations (which intentionally drops an artist's row once it's
+    -- auto-included, since it's no longer "just a suggestion"). Drives the
+    -- Artists tab's match-breakdown column. is_seed=1 rows are seed artists
+    -- (no similarity breakdown -- they're the source, not a match); is_seed=0
+    -- rows are similar artists that were auto-added, with the same breakdown
+    -- shape as recommendations above.
+    CREATE TABLE IF NOT EXISTS playlist_artist_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+      artist_name TEXT NOT NULL,
+      is_seed INTEGER NOT NULL DEFAULT 0,
+      similarity_score REAL,
+      lastfm_pct REAL,
+      lb_pct REAL,
+      corroboration_bonus REAL DEFAULT 0,
+      corroborating_seeds INTEGER DEFAULT 0,
+      genre_checked INTEGER DEFAULT 0,
+      genre_matched INTEGER,
+      via_seeds TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(playlist_id, artist_name)
+    );
+
+    -- Artists banned from a specific playlist (via the Artists tab's ban
+    -- button). Checked by buildPlaylist to exclude them from future
+    -- auto-add/recommendation; does NOT retroactively touch Plex on its own
+    -- -- takes effect passively on the playlist's next rebuild (manual or
+    -- weekly), never an immediate Plex write from the ban click itself.
+    CREATE TABLE IF NOT EXISTS playlist_banned_artists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+      artist_name TEXT NOT NULL,
+      banned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(playlist_id, artist_name)
     );
 
     -- Insert default settings if not present
@@ -110,6 +161,28 @@ function initDb() {
     db.exec('ALTER TABLE playlists ADD COLUMN seed_percentage INTEGER');
     console.log('[DB] Migrated: added playlists.seed_percentage column');
   }
+
+  // Migration: add the combined-score breakdown columns to recommendations
+  // for databases created before this feature existed. Same reasoning as
+  // seed_percentage above -- CREATE TABLE IF NOT EXISTS only helps brand new
+  // databases, an existing recommendations table needs each column added by
+  // hand. Left NULL/0 on every row that already exists; those rows just show
+  // a plainer match line in the UI (no last.fm/ListenBrainz/bonus/genre
+  // breakdown) until the playlist's next rebuild fills them in.
+  const recommendationColumns = db.prepare('PRAGMA table_info(recommendations)').all();
+  const addRecommendationColumn = (name, ddl) => {
+    if (!recommendationColumns.some(c => c.name === name)) {
+      db.exec(`ALTER TABLE recommendations ADD COLUMN ${ddl}`);
+      console.log(`[DB] Migrated: added recommendations.${name} column`);
+    }
+  };
+  addRecommendationColumn('lastfm_pct', 'lastfm_pct REAL');
+  addRecommendationColumn('lb_pct', 'lb_pct REAL');
+  addRecommendationColumn('corroboration_bonus', 'corroboration_bonus REAL DEFAULT 0');
+  addRecommendationColumn('corroborating_seeds', 'corroborating_seeds INTEGER DEFAULT 0');
+  addRecommendationColumn('genre_checked', 'genre_checked INTEGER DEFAULT 0');
+  addRecommendationColumn('genre_matched', 'genre_matched INTEGER');
+  addRecommendationColumn('via_seeds', 'via_seeds TEXT');
 
   console.log('[DB] Database initialized');
 }
