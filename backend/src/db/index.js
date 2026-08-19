@@ -74,6 +74,7 @@ function initDb() {
       corroborating_seeds INTEGER DEFAULT 0,
       genre_checked INTEGER DEFAULT 0,
       genre_matched INTEGER,
+      genre_skip_reason TEXT, -- why genre_checked=0: 'below_cap' | 'no_mbid' | 'no_candidate_genre_data' | 'no_seed_genre_data'
       via_seeds TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -114,6 +115,7 @@ function initDb() {
       corroborating_seeds INTEGER DEFAULT 0,
       genre_checked INTEGER DEFAULT 0,
       genre_matched INTEGER,
+      genre_skip_reason TEXT,
       via_seeds TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(playlist_id, artist_name)
@@ -182,7 +184,21 @@ function initDb() {
   addRecommendationColumn('corroborating_seeds', 'corroborating_seeds INTEGER DEFAULT 0');
   addRecommendationColumn('genre_checked', 'genre_checked INTEGER DEFAULT 0');
   addRecommendationColumn('genre_matched', 'genre_matched INTEGER');
+  addRecommendationColumn('genre_skip_reason', 'genre_skip_reason TEXT');
   addRecommendationColumn('via_seeds', 'via_seeds TEXT');
+
+  // Migration: add genre_skip_reason to playlist_artist_stats. This table
+  // itself is new enough (shipped alongside the columns above) that it
+  // didn't need a migration at first -- CREATE TABLE IF NOT EXISTS handled
+  // it for everyone on that update. But that means databases that already
+  // ran that migration now have a playlist_artist_stats table missing this
+  // one later column, same situation as recommendations above, so it needs
+  // the exact same manual ALTER TABLE treatment.
+  const artistStatsColumns = db.prepare('PRAGMA table_info(playlist_artist_stats)').all();
+  if (!artistStatsColumns.some(c => c.name === 'genre_skip_reason')) {
+    db.exec('ALTER TABLE playlist_artist_stats ADD COLUMN genre_skip_reason TEXT');
+    console.log('[DB] Migrated: added playlist_artist_stats.genre_skip_reason column');
+  }
 
   console.log('[DB] Database initialized');
 }

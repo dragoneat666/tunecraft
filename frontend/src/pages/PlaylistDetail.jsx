@@ -10,6 +10,17 @@ function WeightLabel({ weight }) {
   return <span style={{ color: '#888', fontSize: 12 }}>Normal</span>;
 }
 
+// Why a candidate's genre wasn't checked (see genre_skip_reason in
+// db/index.js and similarityRanking.js) -- shown instead of silently
+// omitting the genre segment, so "genre not checked" always says *why*
+// rather than leaving it ambiguous whether the check ran at all.
+const GENRE_SKIP_REASON_TEXT = {
+  below_cap: 'genre not checked (outside top 30 by score)',
+  no_mbid: 'genre not checked (no MusicBrainz match)',
+  no_candidate_genre_data: 'genre not checked (no MusicBrainz genre data)',
+  no_seed_genre_data: 'genre not checked (no seed genre data)',
+};
+
 // Builds the friendly "why is this the score it is" line shared by the
 // Recommendations tab and the Artists tab's match column. Works against
 // either a `recommendations` row or a `playlist_artist_stats` row -- both
@@ -17,17 +28,22 @@ function WeightLabel({ weight }) {
 // db/index.js), so one formatter covers both.
 //   "100.0% match - last.fm 90.0% - Listenbrainz: 95.0% - +10 corroboration,
 //    3 seeds · genre ✓ match · via Avenged Sevenfold, Shinedown, Volbeat"
-// Any piece whose data isn't available (older pre-migration rows, a source
-// that had no data for this artist, corroboration from only one seed, genre
-// not checked) is simply omitted rather than shown as a blank/zero.
+// Last.fm and ListenBrainz always show a segment each -- "N/A" when that
+// source simply had no data for this artist, so a missing source reads as
+// "we checked and it wasn't there" rather than being silently dropped
+// (indistinguishable from "we never asked"). Genre always shows a segment
+// too: either the match/mismatch result, or a specific reason it wasn't
+// checked at all (see GENRE_SKIP_REASON_TEXT above).
 function formatMatchLine(row) {
   const bits = [`${(row.similarity_score * 100).toFixed(1)}% match`];
-  if (row.lastfm_pct != null) bits.push(`last.fm ${row.lastfm_pct.toFixed(1)}%`);
-  if (row.lb_pct != null) bits.push(`Listenbrainz: ${row.lb_pct.toFixed(1)}%`);
+  bits.push(`last.fm ${row.lastfm_pct != null ? row.lastfm_pct.toFixed(1) + '%' : 'N/A'}`);
+  bits.push(`Listenbrainz: ${row.lb_pct != null ? row.lb_pct.toFixed(1) + '%' : 'N/A'}`);
   if (row.corroboration_bonus > 0) bits.push(`+${row.corroboration_bonus} corroboration, ${row.corroborating_seeds} seeds`);
   let line = bits.join(' - ');
   const tail = [];
-  if (row.genre_checked) tail.push(`genre ${row.genre_matched ? '✓ match' : '✗ no match (×0.9)'}`);
+  tail.push(row.genre_checked
+    ? `genre ${row.genre_matched ? '✓ match' : '✗ no match (×0.9)'}`
+    : (GENRE_SKIP_REASON_TEXT[row.genre_skip_reason] || 'genre not checked'));
   if (row.via_seeds) tail.push(`via ${row.via_seeds}`);
   if (tail.length) line += (line ? ' · ' : '') + tail.join(' · ');
   return line;

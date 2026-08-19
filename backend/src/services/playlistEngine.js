@@ -421,6 +421,7 @@ async function buildPlaylist(playlistId) {
       corroboratingSeeds: similar.corroboratingSeeds,
       genreChecked: similar.genreChecked,
       genreMatched: similar.genreMatched,
+      genreSkipReason: similar.genreSkipReason || null,
       viaSeeds: similar.perSeed.map(p => p.seedName),
     };
     if (inPlex && similar.score >= AUTO_ADD_SIMILARITY_THRESHOLD) {
@@ -574,9 +575,9 @@ async function buildPlaylist(playlistId) {
     INSERT INTO recommendations (
       playlist_id, artist_name, artist_mbid, similarity_score, source,
       lastfm_pct, lb_pct, corroboration_bonus, corroborating_seeds,
-      genre_checked, genre_matched, via_seeds
+      genre_checked, genre_matched, genre_skip_reason, via_seeds
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(playlist_id, artist_name) DO UPDATE SET
       similarity_score = excluded.similarity_score,
       lastfm_pct = excluded.lastfm_pct,
@@ -585,6 +586,7 @@ async function buildPlaylist(playlistId) {
       corroborating_seeds = excluded.corroborating_seeds,
       genre_checked = excluded.genre_checked,
       genre_matched = excluded.genre_matched,
+      genre_skip_reason = excluded.genre_skip_reason,
       via_seeds = excluded.via_seeds,
       updated_at = CURRENT_TIMESTAMP
   `);
@@ -596,6 +598,7 @@ async function buildPlaylist(playlistId) {
         artist.breakdown.corroboratingSeeds,
         artist.breakdown.genreChecked ? 1 : 0,
         artist.breakdown.genreMatched == null ? null : (artist.breakdown.genreMatched ? 1 : 0),
+        artist.breakdown.genreSkipReason,
         artist.breakdown.viaSeeds.join(', ')
       );
     }
@@ -614,12 +617,12 @@ async function buildPlaylist(playlistId) {
     INSERT INTO playlist_artist_stats (
       playlist_id, artist_name, is_seed, similarity_score,
       lastfm_pct, lb_pct, corroboration_bonus, corroborating_seeds,
-      genre_checked, genre_matched, via_seeds
+      genre_checked, genre_matched, genre_skip_reason, via_seeds
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (const seed of seeds) {
-    insertStat.run(playlistId, seed.artist_name, 1, null, null, null, 0, 0, 0, null, null);
+    insertStat.run(playlistId, seed.artist_name, 1, null, null, null, 0, 0, 0, null, null, null);
   }
   for (const similar of inPlexSimilar) {
     insertStat.run(
@@ -628,6 +631,7 @@ async function buildPlaylist(playlistId) {
       similar.breakdown.corroboratingSeeds,
       similar.breakdown.genreChecked ? 1 : 0,
       similar.breakdown.genreMatched == null ? null : (similar.breakdown.genreMatched ? 1 : 0),
+      similar.breakdown.genreSkipReason,
       similar.breakdown.viaSeeds.join(', ')
     );
   }

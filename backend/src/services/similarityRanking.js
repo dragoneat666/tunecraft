@@ -52,6 +52,17 @@ const GENRE_MISMATCH_MULTIPLIER = 0.9;
 // rather than silently treated as a genre match.
 const GENRE_CHECK_TOP_N = 30;
 
+// How many similar artists to ask Last.fm for per seed. Matches the old
+// Last.fm-only system's SIMILAR_PER_SEED_LIMIT (150) -- this was briefly
+// dropped to 25 when the combined score first shipped, which silently made
+// Last.fm blind to anything it would have ranked 26th-150th for a seed (an
+// artist could then show up with ListenBrainz-only data, or with a lower
+// blended score than it should've had, even though Last.fm genuinely rates
+// it highly -- just outside the smaller window). Restoring the original
+// number costs nothing extra: this is still exactly one Last.fm API call
+// per seed either way, just asking for a bigger response.
+const LASTFM_PER_SEED_LIMIT = 150;
+
 function sleep(ms) {
   return listenbrainz.sleep(ms);
 }
@@ -77,7 +88,7 @@ async function computeCombinedSimilarity(seeds) {
   }
 
   for (const seed of seeds) {
-    const lastfmResults = await lastfm.getSimilarArtists(seed.artist_name, 25);
+    const lastfmResults = await lastfm.getSimilarArtists(seed.artist_name, LASTFM_PER_SEED_LIMIT);
 
     await paceMb();
     const lbOutcome = await listenbrainz.getSimilarArtists(seed.artist_name);
@@ -162,16 +173,30 @@ async function computeCombinedSimilarity(seeds) {
   const toCheck = scored.slice(0, GENRE_CHECK_TOP_N);
   const skipped = scored.slice(GENRE_CHECK_TOP_N);
 
+  // Every path that leaves a candidate's genre unchecked also records WHY --
+  // "not checked" alone doesn't say whether it's because this candidate fell
+  // outside the top-N cutoff, MusicBrainz simply had no genre tags for it, or
+  // no seed had genre data to check against in the first place, and that
+  // distinction is exactly what's needed to explain a specific candidate's
+  // missing genre line rather than just shrugging at it.
   for (const candidate of toCheck) {
+    if (seedGenrePool.size === 0) {
+      candidate.genreChecked = false;
+      candidate.genreMatched = null;
+      candidate.genreSkipReason = 'no_seed_genre_data';
+      candidate.finalScore = candidate.preGenreScore;
+      continue;
+    }
     let mbid = candidate.mbid;
     if (!mbid) {
       await paceMb();
       const resolved = await listenbrainz.resolveMusicBrainzId(candidate.name);
       mbid = resolved?.mbid || null;
     }
-    if (!mbid || seedGenrePool.size === 0) {
+    if (!mbid) {
       candidate.genreChecked = false;
       candidate.genreMatched = null;
+      candidate.genreSkipReason = 'no_mbid';
       candidate.finalScore = candidate.preGenreScore;
       continue;
     }
@@ -180,17 +205,20 @@ async function computeCombinedSimilarity(seeds) {
     if (!candidateGenres || candidateGenres.length === 0) {
       candidate.genreChecked = false;
       candidate.genreMatched = null;
+      candidate.genreSkipReason = 'no_candidate_genre_data';
       candidate.finalScore = candidate.preGenreScore;
       continue;
     }
     const overlap = candidateGenres.some(g => seedGenrePool.has(g));
     candidate.genreChecked = true;
     candidate.genreMatched = overlap;
+    candidate.genreSkipReason = null;
     candidate.finalScore = overlap ? candidate.preGenreScore : candidate.preGenreScore * GENRE_MISMATCH_MULTIPLIER;
   }
   for (const candidate of skipped) {
     candidate.genreChecked = false;
     candidate.genreMatched = null;
+    candidate.genreSkipReason = 'below_cap';
     candidate.finalScore = candidate.preGenreScore;
   }
 
