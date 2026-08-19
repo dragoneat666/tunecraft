@@ -215,6 +215,44 @@ export default function Settings() {
         </div>
       </form>
 
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title">How the Match Score Works</div>
+        <p style={{ fontSize: 13, color: '#888', lineHeight: 1.6, marginBottom: 12 }}>
+          Every similar-artist match you see in Recommendations or the Artists tab is built from two independent
+          sources plus a genre sanity check, combined like this:
+        </p>
+        <p style={{ fontSize: 13, color: '#888', lineHeight: 1.6, marginBottom: 12 }}>
+          <strong style={{ color: '#ccc' }}>Last.fm + ListenBrainz blend.</strong> Last.fm contributes a
+          tag/listener-based similarity percentage; ListenBrainz contributes a session co-occurrence score,
+          converted to a percentage of that seed's own strongest ListenBrainz match (raw ListenBrainz scores
+          aren't otherwise comparable between artists). When both sources have an opinion on a candidate, the
+          blended score is their <em>average</em> — not a sum, so two strong scores land in the middle rather
+          than stacking past 100%. When only one source has data, that source is used on its own. A source
+          simply not returning a result for an artist is treated as "no opinion" (shown as N/A) — never as a 0%.
+        </p>
+        <p style={{ fontSize: 13, color: '#888', lineHeight: 1.6, marginBottom: 12 }}>
+          <strong style={{ color: '#ccc' }}>Multi-seed corroboration.</strong> If more than one of a playlist's
+          seed artists independently turns up the same candidate, that agreement adds a bonus of +5 percentage
+          points per additional agreeing seed, capped at +15 total.
+        </p>
+        <p style={{ fontSize: 13, color: '#888', lineHeight: 1.6, marginBottom: 12 }}>
+          <strong style={{ color: '#ccc' }}>Genre check.</strong> On top of the blended-plus-bonus score,
+          Tunecraft compares the candidate's MusicBrainz genre tags against the seeds' own tags. A shared tag
+          means no penalty. No shared tag — when both sides actually had genre data to compare — applies a
+          soft ×0.9 penalty (a 10% reduction, not a hard cutoff, so a strong match survives being "wrong" about
+          genre once). If genre couldn't be checked at all (no MusicBrainz genre data on either side, no
+          MusicBrainz match found for the candidate, or the candidate fell outside the top 30 by score — genre
+          checking is capped there to keep builds from taking forever), no penalty is applied either, and the
+          match line says exactly why it wasn't checked.
+        </p>
+        <p style={{ fontSize: 13, color: '#888', lineHeight: 1.6 }}>
+          <strong style={{ color: '#ccc' }}>Auto-add.</strong> Artists already in your Plex library who score
+          60% or higher after all of the above get added to the playlist automatically. Everything else —
+          lower-scoring library matches, or good matches you don't own yet — shows up under Recommendations
+          instead, where you can add them by hand or send them to Lidarr.
+        </p>
+      </div>
+
       <div className="card">
         <div className="card-title">About Tunecraft</div>
         <p style={{ fontSize: 13, color: '#888', lineHeight: 1.6 }}>

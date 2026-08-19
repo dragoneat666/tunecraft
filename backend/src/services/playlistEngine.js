@@ -566,11 +566,20 @@ async function buildPlaylist(playlistId) {
     }
   }
 
-  // Filter out artists already in seeds and already recommended
-  const existingRecs = db.prepare(
-    'SELECT artist_name FROM recommendations WHERE playlist_id = ?'
-  ).all(playlistId).map(r => r.artist_name.toLowerCase());
-  const existingRecSet = new Set(existingRecs);
+  // Upsert a recommendation row for every current candidate not already a
+  // seed. This used to also skip any artist already in the recommendations
+  // table at all -- meaning once a row existed, it was frozen forever: the
+  // ON CONFLICT DO UPDATE below could never actually fire, so a recommendation
+  // created back before this breakdown data existed (or even just before a
+  // later scoring tweak) would keep showing its original score with blank
+  // last.fm/ListenBrainz/genre fields on every future build, no matter how
+  // many times the playlist rebuilt. That's exactly why some real
+  // recommendations were showing a % with every source marked N/A -- they
+  // were untouched leftovers from an earlier version of the algorithm. Status
+  // ('pending' / 'dismissed' / 'added_to_lidarr') is deliberately NOT in the
+  // UPDATE SET below, so refreshing a row's score/breakdown here can never
+  // resurrect something the user already dismissed or added -- it stays
+  // hidden from the UI either way (GET /:id only returns status='pending').
   const upsertRec = db.prepare(`
     INSERT INTO recommendations (
       playlist_id, artist_name, artist_mbid, similarity_score, source,
@@ -591,7 +600,7 @@ async function buildPlaylist(playlistId) {
       updated_at = CURRENT_TIMESTAMP
   `);
   for (const [, artist] of similarArtistsFound) {
-    if (!seedNames.has(artist.name.toLowerCase()) && !existingRecSet.has(artist.name.toLowerCase())) {
+    if (!seedNames.has(artist.name.toLowerCase())) {
       upsertRec.run(
         playlistId, artist.name, artist.mbid, artist.score, artist.source,
         artist.breakdown.lastfmPct, artist.breakdown.lbPct, artist.breakdown.bonus,
