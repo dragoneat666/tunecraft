@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { fetchWithRetry } = require('./httpRetry');
 
 // This service is comparison-only right now: it looks up similar artists via
 // MusicBrainz + ListenBrainz on demand for the ListenBrainz tab in the
@@ -39,7 +40,7 @@ function sleep(ms) {
 async function resolveMusicBrainzId(artistName) {
   try {
     const url = `https://musicbrainz.org/ws/2/artist/?query=${encodeURIComponent(artistName)}&fmt=json&limit=1`;
-    const res = await fetch(url, { headers: MB_HEADERS });
+    const res = await fetchWithRetry(url, { headers: MB_HEADERS }, { label: `MusicBrainz resolve "${artistName}"` });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const match = data.artists?.[0];
@@ -67,11 +68,11 @@ async function getSimilarArtistsByMbid(mbid) {
 
   for (const algorithm of algorithms) {
     try {
-      const res = await fetch('https://labs.api.listenbrainz.org/similar-artists/json', {
+      const res = await fetchWithRetry('https://labs.api.listenbrainz.org/similar-artists/json', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify([{ artist_mbids: [mbid], algorithm }]),
-      });
+      }, { label: `ListenBrainz similar-artists (${algorithm})` });
       if (!res.ok) continue;
       const data = await res.json();
       if (Array.isArray(data) && data.length) {
@@ -112,7 +113,7 @@ async function getSimilarArtists(artistName) {
 async function getGenres(mbid) {
   try {
     const url = `https://musicbrainz.org/ws/2/artist/${mbid}?fmt=json&inc=genres`;
-    const res = await fetch(url, { headers: MB_HEADERS });
+    const res = await fetchWithRetry(url, { headers: MB_HEADERS }, { label: `MusicBrainz genres (${mbid})` });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const genres = (data.genres || []).map(g => g.name.toLowerCase());

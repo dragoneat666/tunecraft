@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { fetchWithRetry } = require('./httpRetry');
 
 const BASE_URL = 'https://ws.audioscrobbler.com/2.0/';
 const API_KEY = () => process.env.LASTFM_API_KEY;
@@ -12,7 +13,7 @@ async function lastfmGet(method, params = {}) {
     url.searchParams.set(k, v);
   }
 
-  const res = await fetch(url.toString());
+  const res = await fetchWithRetry(url.toString(), {}, { label: `Last.fm ${method}` });
   if (!res.ok) throw new Error(`Last.fm API error ${res.status}: ${method}`);
   const data = await res.json();
 
