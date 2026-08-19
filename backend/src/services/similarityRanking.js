@@ -67,6 +67,31 @@ function sleep(ms) {
   return listenbrainz.sleep(ms);
 }
 
+// Reduces an artist name to bare alphanumerics for candidate-merging
+// purposes -- deliberately duplicated from plex.js's alnumOnly/
+// normalizeArtistName rather than importing that module here, since this is
+// a pure scoring file and plex.js pulls in the whole Plex-API-calling
+// surface just for a string helper.
+//
+// Last.fm and ListenBrainz/MusicBrainz don't always agree on punctuation for
+// the exact same real artist -- a plain hyphen in Last.fm's "Blink-182" vs.
+// MusicBrainz's typographic one, a leading "The", a curly vs. straight
+// apostrophe, etc. Merging candidates by a plain `.toLowerCase()` name treats
+// those as two different artists, so the same band can end up split into two
+// separate entries -- one with only Last.fm's data, one with only
+// ListenBrainz's -- instead of one candidate with both blended together
+// (exactly the "blink-182 shows up twice" bug this fixes). Reducing both
+// sides to bare alphanumerics sidesteps the punctuation mismatch entirely,
+// the same fix reconcileManualAdditions already relies on elsewhere in this
+// app for the identical class of problem.
+function candidateKey(name) {
+  return (name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^the\s+/, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
 // Runs the full combined-scoring pipeline for a playlist's seeds.
 // `seeds` is an array of { artist_name } (playlist_seeds rows work fine).
 // Returns { candidates, seedGenres, warnings }.
@@ -114,11 +139,11 @@ async function computeCombinedSimilarity(seeds) {
     // blended number, not two separate entries.
     const bySeedCandidate = new Map();
     for (const r of lastfmResults) {
-      const key = r.name.toLowerCase();
+      const key = candidateKey(r.name);
       bySeedCandidate.set(key, { name: r.name, mbid: r.mbid || null, lastfmPct: r.match * 100, lbPct: null });
     }
     for (const r of lbResults) {
-      const key = r.name.toLowerCase();
+      const key = candidateKey(r.name);
       const existing = bySeedCandidate.get(key) || { name: r.name, mbid: null, lastfmPct: null, lbPct: null };
       existing.lbPct = lbTop ? (r.score / lbTop) * 100 : 0;
       existing.mbid = existing.mbid || r.mbid || null;
