@@ -5,6 +5,7 @@ const { buildPlaylist, scanForNewRadioPlaylists, generatePlaylistName } = requir
 const lastfm = require('../services/lastfm');
 const lidarr = require('../services/lidarr');
 const listenbrainz = require('../services/listenbrainz');
+const similarityRanking = require('../services/similarityRanking');
 
 // Fetch Lidarr's current artist list once and return a lowercase name set,
 // so callers can flag recommendations that are already in Lidarr without
@@ -263,6 +264,34 @@ router.get('/:id/similar/listenbrainz', async (req, res) => {
 
   const results = [...merged.values()].sort((a, b) => b.score - a.score);
   res.json({ results, warnings });
+});
+
+// GET /api/playlists/:id/similar/combined - on-demand combined Last.fm +
+// ListenBrainz + MusicBrainz-genre scoring for this playlist's current
+// seeds, for the "Combined" sub-tab under Recommendations. Comparison only,
+// same as the ListenBrainz tab above -- nothing here is written to
+// recommendations/seeds, and nothing touches Plex or Lidarr, and nothing
+// feeds buildPlaylist. This is meant to be eyeballed against the existing
+// Last.fm-only recommendations before it's ever trusted to actually drive a
+// real playlist. Can take a minute or two on a multi-seed playlist since it
+// makes many MusicBrainz calls, paced to respect their rate limit.
+router.get('/:id/similar/combined', async (req, res) => {
+  const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id);
+  if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
+
+  const seeds = db.prepare(
+    'SELECT * FROM playlist_seeds WHERE playlist_id = ? ORDER BY weight DESC, artist_name'
+  ).all(req.params.id);
+  if (!seeds.length) {
+    return res.json({ candidates: [], seedGenres: [], warnings: ['This playlist has no seed artists yet.'] });
+  }
+
+  try {
+    const result = await similarityRanking.computeCombinedSimilarity(seeds);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/playlists/scan - scan Plex for new Radio: playlists

@@ -22,14 +22,17 @@ export default function PlaylistDetail() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [pickerRec, setPickerRec] = useState(null); // rec currently being matched against MusicBrainz
-  const [recSource, setRecSource] = useState('lastfm'); // 'lastfm' | 'listenbrainz' sub-tab under Recommendations
+  const [recSource, setRecSource] = useState('lastfm'); // 'lastfm' | 'listenbrainz' | 'combined' sub-tab under Recommendations
   const [lbData, setLbData] = useState(null); // { results, warnings } | null (not fetched yet this visit)
   const [lbLoading, setLbLoading] = useState(false);
+  const [combinedData, setCombinedData] = useState(null); // { candidates, seedGenres, warnings } | null
+  const [combinedLoading, setCombinedLoading] = useState(false);
 
   useEffect(() => {
     load();
     setRecSource('lastfm');
     setLbData(null);
+    setCombinedData(null);
   }, [id]);
 
   async function load() {
@@ -158,6 +161,23 @@ export default function PlaylistDetail() {
     }
   }
 
+  // Fetches the combined Last.fm + ListenBrainz + genre score for this
+  // playlist's seeds. Same on-demand, comparison-only pattern as the
+  // ListenBrainz tab -- can take a minute or two on a multi-seed playlist
+  // since it makes many paced MusicBrainz calls.
+  async function handleFetchCombined() {
+    try {
+      setCombinedLoading(true);
+      setError(null);
+      const data = await api.getCombinedSimilar(id);
+      setCombinedData(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCombinedLoading(false);
+    }
+  }
+
   // Distinct artists actually present in the current track list, with how
   // many tracks each one contributes. Derived from playlist.tracks rather
   // than a separate API call since that data's already fetched.
@@ -267,6 +287,10 @@ export default function PlaylistDetail() {
               className={`btn btn-sm ${recSource === 'listenbrainz' ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => setRecSource('listenbrainz')}
             >ListenBrainz</button>
+            <button
+              className={`btn btn-sm ${recSource === 'combined' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setRecSource('combined')}
+            >Combined</button>
           </div>
 
           {recSource === 'lastfm' && (
@@ -364,6 +388,58 @@ export default function PlaylistDetail() {
                       <div className="rec-info">
                         <div className="rec-name">{r.name}</div>
                         <div className="rec-meta">Score: {r.score} (raw, not a %) · via {r.viaSeed}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {recSource === 'combined' && (
+            <>
+              <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
+                Comparison only — nothing here gets added to the playlist, Lidarr, or Plex, and it doesn't
+                affect what Rebuild does. Blends Last.fm + ListenBrainz into one score per artist, adds a
+                small bonus when more than one of your seeds agrees, and checks MusicBrainz genre tags as a
+                sanity check (soft penalty on a mismatch, never a hard cutoff). Can take a minute or two to
+                run on a playlist with multiple seeds.
+              </p>
+              <button className="btn btn-secondary" onClick={handleFetchCombined} disabled={combinedLoading}>
+                {combinedLoading ? '⏳ Fetching... (can take a minute or two)' : '🔄 Refresh combined score'}
+              </button>
+
+              {combinedData?.warnings?.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  {combinedData.warnings.map((w, i) => (
+                    <p key={i} style={{ fontSize: 12, color: '#e0a052' }}>⚠️ {w}</p>
+                  ))}
+                </div>
+              )}
+
+              {!combinedData && !combinedLoading && (
+                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>
+                  Click Refresh to compute the combined score for this playlist's seeds.
+                </p>
+              )}
+
+              {combinedData && !combinedData.candidates.length && !combinedData.warnings.length && (
+                <p style={{ color: '#888', fontSize: 14, marginTop: 12 }}>No results.</p>
+              )}
+
+              {combinedData?.candidates?.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  {combinedData.candidates.map((c, i) => (
+                    <div key={`${c.name}-${i}`} className="rec-item">
+                      <div className="rec-info">
+                        <div className="rec-name">{c.name}</div>
+                        <div className="rec-meta">
+                          {c.finalScore.toFixed(1)}% match
+                          {' · '}base {c.preGenreScore.toFixed(1)}%
+                          {c.bonus > 0 && ` (+${c.bonus} corroboration, ${c.corroboratingSeeds} seeds)`}
+                          {' · '}genre {c.genreChecked ? (c.genreMatched ? '✓ match' : '✗ no match (×0.9)') : 'not checked'}
+                          {' · '}via {c.perSeed.map(p => p.seedName).join(', ')}
+                        </div>
                       </div>
                     </div>
                   ))}

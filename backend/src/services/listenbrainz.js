@@ -103,10 +103,31 @@ async function getSimilarArtists(artistName) {
   return { name: resolved.name, mbid: resolved.mbid, results, algorithmFailed: false };
 }
 
+// Get MusicBrainz's community-voted genre tags for an artist by mbid, for
+// the combined-score genre check (see services/similarityRanking.js).
+// Returns a lowercased array of genre names on success (possibly empty, if
+// the artist genuinely has no genre tags in MusicBrainz), or null if the
+// lookup itself failed -- callers should treat both "no data" cases (null
+// and []) as "can't check," not as a mismatch.
+async function getGenres(mbid) {
+  try {
+    const url = `https://musicbrainz.org/ws/2/artist/${mbid}?fmt=json&inc=genres`;
+    const res = await fetch(url, { headers: MB_HEADERS });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const genres = (data.genres || []).map(g => g.name.toLowerCase());
+    return genres;
+  } catch (err) {
+    console.warn(`[ListenBrainz] Failed to get genres for mbid ${mbid}:`, err.message);
+    return null;
+  }
+}
+
 module.exports = {
   resolveMusicBrainzId,
   getSimilarArtistsByMbid,
   getSimilarArtists,
+  getGenres,
   MB_RATE_LIMIT_MS,
   sleep,
 };

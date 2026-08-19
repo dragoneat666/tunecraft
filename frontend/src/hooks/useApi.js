@@ -42,6 +42,11 @@ export const api = {
   // GET /playlists/:id/similar/listenbrainz)
   getListenBrainzSimilar: (playlistId) => apiFetch(`/playlists/${playlistId}/similar/listenbrainz`),
 
+  // Combined Last.fm + ListenBrainz + genre comparison (on-demand,
+  // comparison-only — see GET /playlists/:id/similar/combined). Can take a
+  // minute or two on a multi-seed playlist.
+  getCombinedSimilar: (playlistId) => apiFetch(`/playlists/${playlistId}/similar/combined`),
+
   // Settings
   getSettings: () => apiFetch('/settings'),
   updateSettings: (body) => apiFetch('/settings', { method: 'PUT', body }),
